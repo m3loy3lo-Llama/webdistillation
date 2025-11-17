@@ -2,6 +2,12 @@
 
 *"Æther remembers 895 words from his childhood. And he keeps learning."*
 
+How to set up, 
+Npm install
+download Distilgpt2 from huggingface (requires local model + Onnx files)
+That's it, Done
+
+
 A revolutionary continual learning AI system that performs semantic backpropagation across three neural phases, enabling perpetual vocabulary expansion while maintaining meaning coherence.
 
 **Unique Features:**
