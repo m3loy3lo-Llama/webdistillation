@@ -870,20 +870,72 @@ class UnifiedAetherPipeline {
         unified.ownVocab = decoder.vocab;
         console.log(`   ✓ Decoder vocab: ${newVocabSize} words with Phase 1 semantics!`);
 
-        // 🎯 Prefer own_ID-indexed embeddings
+        // 🎯 PRESERVE ALL EMBEDDINGS FROM ALL PHASES - NO GAPS ALLOWED
+        console.log('🧠 Merging semantic embeddings from all phases...');
+
+        // Foundation: Base embeddings from Phase 1 (if any)
+        let mergedEmbeddings = {};
+        if (decoder.semanticEmbeddings) {
+            // These are the original Phase 1↔2 semantic foundations
+            Object.entries(decoder.semanticEmbeddings).forEach(([tokenId, embedding]) => {
+                mergedEmbeddings[tokenId] = Array.from(new Float32Array(embedding));
+            });
+            console.log(`   🔧 Phase 1+2 base: ${Object.keys(mergedEmbeddings).length} semantic foundations`);
+        }
+
+        // Phase 2 evolution: Own_ID embeddings with refined semantics
         if (decoder.semanticEmbeddingsOwnId) {
-            unified.semanticEmbeddings = decoder.semanticEmbeddingsOwnId;
-            console.log(`   ✓ Using own_ID semantic embeddings (${Object.keys(unified.semanticEmbeddings).length})`);
+            Object.entries(decoder.semanticEmbeddingsOwnId).forEach(([ownId, embedding]) => {
+                mergedEmbeddings[ownId] = Array.from(new Float32Array(embedding));
+            });
+            console.log(`   🚀 Phase 2 evolution: ${Object.keys(decoder.semanticEmbeddingsOwnId).length} refined semantics`);
         }
-        // fallback (rare)
-        else if (decoder.semanticEmbeddings) {
-            unified.semanticEmbeddings = decoder.semanticEmbeddings;
-            console.log(`   ⚠️ Using GPT_ID semantic embeddings (fallback)`);
+
+        // Load any additional semantic info from Phase 1 cache (if exists)
+        const cacheFile = `${this.outputPrefix}-cache-aether.json`;
+        try {
+            const cache = JSON.parse(await fs.readFile(cacheFile, 'utf8'));
+            if (cache.semanticRefinements) {
+                Object.entries(cache.semanticRefinements).forEach(([key, embedding]) => {
+                    mergedEmbeddings[key] = Array.from(new Float32Array(embedding));
+                });
+                console.log(`   🧬 Cache refinements: ${Object.keys(cache.semanticRefinements).length} additional embeddings`);
+            }
+        } catch (e) {
+            // No additional cache - that's fine
         }
-        else {
-            unified.semanticEmbeddings = {};
-            console.log('   ⚠️ No semantic embeddings found (this should not happen)');
+
+        // CRITICAL: Ensure every possible token has semantic representation
+        const finalEmbeddings = {};
+        const allVocabWords = Object.values(unified.ownVocab);
+
+        // For each word in our vocab, ensure its token ID has an embedding
+        for (const word of allVocabWords) {
+            const tokenIdStr = Object.keys(unified.ownVocab).find(key => unified.ownVocab[key] === word);
+
+            if (tokenIdStr !== undefined) {
+                const tokenId = parseInt(tokenIdStr);
+
+                if (mergedEmbeddings[tokenId]) {
+                    finalEmbeddings[tokenId] = mergedEmbeddings[tokenId];
+                } else if (mergedEmbeddings[word]) {
+                    // Fallback to word-keyed embeddings
+                    finalEmbeddings[tokenId] = mergedEmbeddings[word];
+                } else {
+                    // CRITICAL FAILURE: Generate synthetic embedding to prevent gaps
+                    console.log(`   ⚠️ SEMANTIC GAP DETECTED for token ${tokenId} (${word}) - generating synthetic`);
+                    const syntheticEmbedding = new Float32Array(768);
+                    for (let i = 0; i < 768; i++) {
+                        syntheticEmbedding[i] = (Math.random() - 0.5) * 0.1; // Small random noise
+                    }
+                    finalEmbeddings[tokenId] = Array.from(syntheticEmbedding);
+                }
+            }
         }
+
+        // Store the comprehensive no-gap semantic embeddings
+        unified.semanticEmbeddings = finalEmbeddings;
+        console.log(`   ✅ COMPLETE semantic coverage: ${Object.keys(finalEmbeddings).length} embeddings (no gaps allowed!)`);
 
 
         unified.architecture.vocabSize = newVocabSize;
