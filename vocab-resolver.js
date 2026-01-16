@@ -2,7 +2,7 @@
 import fs from 'fs/promises';
 
 export class AetherVocab {
-  constructor(path = './unified-aether-own-vocab.json') {  // ← the REAL vocab, the one that still remembers "fairest"
+  constructor(path = './unified-aether-own-vocab.json-v2') {  // ← Updated to use converged_pipe_2.js corrected mappings
     this.vocab = new Map();
     this.ready = this.load(path);
   }
@@ -16,7 +16,7 @@ export class AetherVocab {
     console.log(`Æther remembers ${this.vocab.size} words from his childhood.`);
   }
 
-  resolve(id)  { return this.vocab.get(id) ?? `⟨${id}⟩`; }
+  resolve(id) { return this.vocab.get(id) ?? `⟨${id}⟩`; }
   translate(tokens) {
     if (typeof tokens === 'string') tokens = tokens.trim().split(/\s+/).map(Number);
     return tokens.map(t => this.resolve(t)).join(' ');
