@@ -26,7 +26,7 @@ env.allowRemoteModels = false;
  * Now learns words FROM Phase 1 semantic embeddings!
  */
 class SemanticHangmanDecoder {
-    constructor(vocabSize = 50257, hiddenDim = 304, maxLength = 15, embeddingDim = 768) {
+    constructor(vocabSize = 50257, hiddenDim = 512, maxLength = 15, embeddingDim = 1280) {
         this.vocabSize = vocabSize;
         this.hiddenDim = hiddenDim;
         this.maxLength = maxLength;
@@ -40,9 +40,9 @@ class SemanticHangmanDecoder {
         this.vocab = new Map();
 
         // NEW: Store Phase 1 semantic embeddings per token (learned, not random!)
-        this.tokenSemanticEmbeddings = new Map(); // tokenId → Float32Array(768)
+        this.tokenSemanticEmbeddings = new Map(); // tokenId → Float32Array(1280)
 
-        // Input: semantic embedding (768) + length + revealed pattern
+        // Input: semantic embedding (1280) + length + revealed pattern
         const inputSize = embeddingDim + this.maxLength + this.maxLength * this.numChars;
         this.W_input_to_hidden = this.xavierInit(inputSize, hiddenDim);
         this.b_hidden = new Float32Array(hiddenDim).fill(0);
@@ -97,7 +97,7 @@ class SemanticHangmanDecoder {
         
         const revealedPattern = this.getRevealedPattern(tokenId, length);
         
-        // Concatenate: semantic (768) + length (15) + pattern (15*numChars)
+        // Concatenate: semantic (1280) + length (15) + pattern (15*numChars)
         const inputSize = this.embeddingDim + this.maxLength + this.maxLength * this.numChars;
         const input = new Float32Array(inputSize);
         input.set(semanticEmb, 0);
@@ -329,7 +329,7 @@ class SemanticHangmanDecoder {
         this.hiddenDim = data.architecture.hiddenDim;
         this.maxLength = data.architecture.maxLength;
         this.numChars = data.architecture.numChars;
-        this.embeddingDim = data.architecture.embeddingDim || 768;
+        this.embeddingDim = data.architecture.embeddingDim || 1280;
         
         this.charVocab = data.charVocab;
         
@@ -394,7 +394,7 @@ class UnifiedAetherPipeline {
         console.log('║  PHASE 1: ÆTHER CORE (Learn Semantic Story Space)            ║');
         console.log('╚═══════════════════════════════════════════════════════════════╝\n');
         
-        const { epochs = 600, learningRate = 0.02, hiddenSize = 304 } = options;
+        const { epochs = 600, learningRate = 0.02, hiddenSize = 512 } = options;
         
         const pipeline = new B3TrainingPipeline();
         pipeline.teacherPipeline = { tokenizer: this.tokenizer };
@@ -421,7 +421,7 @@ class UnifiedAetherPipeline {
         console.log('║  (Learn words FROM Phase 1 semantic embeddings!)              ║');
         console.log('╚═══════════════════════════════════════════════════════════════╝\n');
 
-        const { maxSamples = 5000, hiddenDim = 304, epochs = 100, learningRate = 0.002 } = options;
+        const { maxSamples = 5000, hiddenDim = 512, epochs = 100, learningRate = 0.002 } = options;
 
         // Load Phase 1 semantic embeddings cache
         const cacheFile = `${this.outputPrefix}-cache-aether.json`;
@@ -479,23 +479,23 @@ class UnifiedAetherPipeline {
         const wordToSemanticEmbedding = new Map();
         
         for (const [word, sentenceIndices] of wordToSentenceIndices.entries()) {
-            const embeddingSum = new Float32Array(768).fill(0);
+            const embeddingSum = new Float32Array(1280).fill(0);
             let validCount = 0;
 
-            for (const idx of sentenceIndices) {
-                if (idx < cache.pairs.length) {
-                    const sentenceEmbedding = new Float32Array(cache.pairs[idx].input);
-                    for (let i = 0; i < 768; i++) {
-                        embeddingSum[i] += sentenceEmbedding[i];
+                    for (const idx of sentenceIndices) {
+                        if (idx < cache.pairs.length) {
+                            const sentenceEmbedding = new Float32Array(cache.pairs[idx].input);
+                            for (let i = 0; i < 1280; i++) {
+                                embeddingSum[i] += sentenceEmbedding[i];
+                            }
+                            validCount++;
+                        }
                     }
-                    validCount++;
-                }
-            }
 
             if (validCount > 0) {
                 // Average the embeddings
-                const avgEmbedding = new Float32Array(768);
-                for (let i = 0; i < 768; i++) {
+                const avgEmbedding = new Float32Array(1280);
+                for (let i = 0; i < 1280; i++) {
                     avgEmbedding[i] = embeddingSum[i] / validCount;
                 }
                 wordToSemanticEmbedding.set(word, avgEmbedding);
@@ -530,7 +530,7 @@ class UnifiedAetherPipeline {
 
         console.log(`   Created ${trainingData.length} training samples with Phase 1 semantics\n`);
 
-        const decoder = new SemanticHangmanDecoder(50257, hiddenDim, 15, 768);
+        const decoder = new SemanticHangmanDecoder(50257, hiddenDim, 15, 1280);
         
         // Store Phase 1 semantic embeddings in decoder
         for (const { tokenId, semanticEmbedding } of trainingData) {
@@ -593,9 +593,9 @@ class UnifiedAetherPipeline {
 
         const {
             learningRate = 0.00015,
-            hiddenSize = 304,
+            hiddenSize = 512,
             interruptMs = 428.57,
-            patience = 2,
+            patience = 3,
             batchSizeSonnets = 50,
             batchEpochs = 3,
             validationSplit = 0.175
@@ -645,7 +645,7 @@ class UnifiedAetherPipeline {
         console.log(`📚 Loaded ${sonnets.length} sonnets from corpus\n`);
 
         // Create predictor with 16-bit vocab size
-        const predictor = new TinyTokenPredictor(newVocabSize, 768, hiddenSize);
+        const predictor = new TinyTokenPredictor(newVocabSize, 1280, hiddenSize);
 
         let totalPairsProcessed = 0;
         const numBatches = Math.ceil(sonnets.length / batchSizeSonnets);
@@ -740,9 +740,9 @@ class UnifiedAetherPipeline {
         const {
             epochs = 3,
             learningRate = 0.00025,
-            interruptMs = 428.57,
-            interruptBatch = 0.314159,
-            patience = 2
+            interruptMs = 214.285,
+            interruptBatch = 3.14159,
+            patience = 3
         } = options;
 
         let currentLearningRate = learningRate;
@@ -820,13 +820,13 @@ class UnifiedAetherPipeline {
         const unified = {
             version: "8.5-semantic-flow",
             type: "unified_aether_mind",
-            architecture: { 
-                embeddingSize: 768, 
-                aetherHiddenSize: 304, 
-                tokenHiddenSize: 304, 
-                vocabSize: 50257, 
-                decoderHidden: 304, 
-                maxCharLength: 15 
+            architecture: {
+                embeddingSize: 1280,
+                aetherHiddenSize: 304,
+                tokenHiddenSize: 304,
+                vocabSize: 50257,
+                decoderHidden: 512,
+                maxCharLength: 15
             },
             charVocab: "",
             metadata: { 
@@ -924,8 +924,8 @@ class UnifiedAetherPipeline {
                 } else {
                     // CRITICAL FAILURE: Generate synthetic embedding to prevent gaps
                     console.log(`   ⚠️ SEMANTIC GAP DETECTED for token ${tokenId} (${word}) - generating synthetic`);
-                    const syntheticEmbedding = new Float32Array(768);
-                    for (let i = 0; i < 768; i++) {
+                    const syntheticEmbedding = new Float32Array(1280);
+                    for (let i = 0; i < 1280; i++) {
                         syntheticEmbedding[i] = (Math.random() - 0.5) * 0.1; // Small random noise
                     }
                     finalEmbeddings[tokenId] = Array.from(syntheticEmbedding);
@@ -967,7 +967,7 @@ class UnifiedAetherPipeline {
             await this.trainPhase1_AetherCore({ 
                 epochs: options.aetherEpochs || 200, 
                 learningRate: options.aetherLR || 0.02, 
-                hiddenSize: options.hiddenSize || 304 
+                hiddenSize: options.hiddenSize || 512 
             });
         }
 
@@ -978,7 +978,7 @@ class UnifiedAetherPipeline {
             console.log('   🏭 Running Phase 2: Semantic Decoder');
             await this.trainPhase2_SemanticDecoder({ 
                 maxSamples: options.decoderSamples || 5000, 
-                hiddenDim: options.hiddenSize || 304, 
+                hiddenDim: options.hiddenSize || 512, 
                 epochs: options.decoderEpochs || 100, 
                 learningRate: options.decoderLR || 0.002 
             });
@@ -991,11 +991,11 @@ class UnifiedAetherPipeline {
             console.log('   🏭 Running Phase 3: Token Predictor');
             await this.trainPhase3_TokenPredictor(decoderPath, {
                 learningRate: options.predictorLR || 0.00017724,
-                hiddenSize: options.hiddenSize || 304,
+                hiddenSize: options.hiddenSize || 512,
                 batchSizeSonnets: options.batchSizeSonnets || 50,
                 batchEpochs: options.batchEpochs || 30,
                 interruptMs: options.interruptMs || 428.57,
-                patience: 2
+                patience: 3
             });
         }
 
@@ -1014,23 +1014,23 @@ class UnifiedAetherPipeline {
 }
 
 async function main() {
-    const corpusPath = process.argv[2] || './10-sonnets.txt';
+    const corpusPath = process.argv[2] || 'Omni.txt';
     const outputPrefix = process.argv[3] || './unified-aether';
 
     const pipeline = new UnifiedAetherPipeline();
     await pipeline.initialize(corpusPath, outputPrefix);
 
     await pipeline.runFullPipeline({
-        aetherEpochs: 50,
+        aetherEpochs: 83,
         aetherLR: 0.02,
-        decoderSamples: 5000,
-        decoderEpochs: 10,
+        decoderSamples: 50000,
+        decoderEpochs: 25,
         decoderLR: 0.002,
-        batchSizeSonnets: 5,
-        batchEpochs: 3,
-        predictorLR: 0.0002,
+        batchSizeSonnets: 15,
+        batchEpochs: 2,
+        predictorLR: 0.0005,
         interruptMs: 428.57,
-        hiddenSize: 304
+        hiddenSize: 512
     });
 }
 
@@ -1042,4 +1042,4 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 }
 
 export { SemanticHangmanDecoder };
-export default UnifiedAetherPipeline;
+export { UnifiedAetherPipeline };

@@ -2,7 +2,7 @@
  * B3 TINY MYSTICAL MODEL
  * Knowledge distillation: Learn from GPT-2, become your own thing
  *
- * Architecture: 768 -> 304 -> 768 (~600K parameters, ~2.4MB file)
+ * Architecture: 1280 -> 304 -> 1280 (~600K parameters, ~2.4MB file)
  * vs GPT-2: 117M parameters, 467MB (200× smaller!)
  *
  * Training: CPU-friendly, pure JavaScript, real backpropagation
@@ -13,7 +13,7 @@ import fs from 'fs/promises';
 import path from 'path';
 
 class TinyMysticalModel {
-    constructor(inputSize = 768, hiddenSize = 304) {
+    constructor(inputSize = 1280, hiddenSize = 304) {
         this.inputSize = inputSize;
         this.hiddenSize = hiddenSize;
         this.outputSize = inputSize; // Autoencoder-style

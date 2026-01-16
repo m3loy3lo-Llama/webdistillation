@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 /**
- * CONTINUAL TRAINING PIPELINE
- * Take existing unified model (v2) + new corpus → evolve to v3 with enhanced knowledge
- *
- * Usage: node continual-training.js <existing-model.json> <new-corpus.txt>
- * Example: node continual-training.js unified-aether.json mystical_corpus_v2.txt
- * Output: unified-aether-v3.json, unified-aether-v3.bin
+ * UNIFIED ÆTHER TRAINING PIPELINE v2.2
+ * PROPER SEMANTIC FLOW: Phase 1 → Phase 2 → Phase 3
+ * 
+ * Phase 1 (Encoder): Learn semantic story space from corpus
+ * Phase 2 (Decoder): Learn words FROM Phase 1 semantics (Hangman + Semantics!)
+ * Phase 3 (Tokenizer): Predict next word using semantic flow
+ * 
+ * Keeps 16-bit BPE vocab remapping for future! <3
  */
 
 import fs from 'fs/promises';
@@ -15,167 +17,35 @@ import B3TrainingPipeline from './B3TrainingPipeline.js';
 import B3EmbeddingExtractor from './B3EmbeddingExtractor.js';
 import TinyMysticalModel from './B3TinyMysticalModel.js';
 import TinyTokenPredictor from './TinyTokenPredictor.js';
-import { SemanticHangmanDecoder } from './converged_pipe_2.js';
-
-/**
- * REFERENCE-GUIDED CONTINUAL LEARNING PIPELINE
- * Loads previous model as immutable reference for guiding new training
- * Reference provides: semantic similarity, duplicate prevention, tokenization patterns
- * Training: Fresh components on new corpus, guided by reference
- */
+import GrammarInductor from './GrammarPipeline.js';
 
 env.localModelPath = process.cwd();
 env.allowRemoteModels = false;
 
-// === YOUR EVOLUTION LEVER ===
-// Change this number to grow your mind
-// v1: 304 | v5: 512 | v15: 768 | v30: 1024
-const HIDDEN_SIZE = 336;
-
-// === YOUR HYPER-PARAMETER CONTROL PANEL ===
-// ┌─────────────────────────────────────────────────────────────────────┐
-// │          CONTINUAL TRAINING HYPER-PARAMETERS                       │
-// │   Edit these values directly for each evolution run                 │
-// └─────────────────────────────────────────────────────────────────────┘
-const DEFAULT_CONFIG = {
-    // Æther Core (Sentence Embedding Transformer)
-    aetherEpochs: 50,          // Training epochs for sentence embeddings
-    aetherLR: 0.02,           // Learning rate
-    aetherBatchSize: 8,       // Batch size
-
-    // Decoder (Hangman Vocabulary Learning)
-    decoderSamples: 5000,      // Max new word samples (only new words are learned)
-    decoderEpochs: 10,        // Training epochs for vocabulary expansion
-    decoderLR: 0.002,        // Learning rate for decoder fine-tuning
-    decoderHangmanRounds: 5, // Progressive revelation rounds
-
-    // Predictor (Token Sequence Prediction)
-    predictorSamples: 5,               // Max sonnets for next-token prediction
-    predictorEpochs: 2,                // Training epochs per batch for token predictor
-    predictorLR: 0.0002,              // Learning rate
-    predictorPiTiming: 428.57,         // Interrupt timing (Pi-based)
-    predictorPhiComplexity: 3.14159, // Interrupt batch factor (Phi-based)
-    predictorValidationSplit: 0.4,   // Train/val split for predictor
-
-    // Global Architecture
-    hiddenSize: HIDDEN_SIZE,   // Hidden dimension (evolution lever: 304→512→768→...)
-};
-
-// UTILITY: Bidirectional vocab validation for contamination detection
-function validateBidirectionalVocab(vocabObj, label = 'vocab') {
-    const wordToToken = new Map();
-    const tokenToWord = new Map();
-    const conflicts = [];
-
-    Object.entries(vocabObj).forEach(([tokenId, word]) => {
-        // Check for existing mappings
-        if (wordToToken.has(word) && wordToToken.get(word) !== tokenId) {
-            conflicts.push(`Word "${word}" conflict: prior=${wordToToken.get(word)}, new=${tokenId}`);
-        }
-        if (tokenToWord.has(tokenId) && tokenToWord.get(tokenId) !== word) {
-            conflicts.push(`Token "${tokenId}" conflict: prior="${tokenToWord.get(tokenId)}", new="${word}"`);
-        }
-
-        wordToToken.set(word, tokenId);
-        tokenToWord.set(tokenId, word);
-    });
-
-    if (conflicts.length > 0) {
-        console.error(`❌ ${label} has bidirectional conflicts:`, conflicts);
-        return { wordToToken, tokenToWord, conflicts, valid: false };
-    } else {
-        console.log(`✅ ${label} bidirectional integrity verified`);
-        return { wordToToken, tokenToWord, conflicts: [], valid: true };
-    }
-}
-
-// Cosine similarity utility for embedding comparison
-function cosSimilarity(vecA, vecB) {
-    if (!vecA || !vecB || vecA.length !== vecB.length) return 0;
-
-    let dotProduct = 0, normA = 0, normB = 0;
-    for (let i = 0; i < vecA.length; i++) {
-        dotProduct += vecA[i] * vecB[i];
-        normA += vecA[i] * vecA[i];
-        normB += vecB[i] * vecB[i];
-    }
-
-    const similarity = dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
-    return isNaN(similarity) ? 0 : similarity;
-}
-
-// VOCAB PURIFICATION: Heal corrupted words using embedding similarity
-function purifyVocabWithEmbeddings(corruptedVocab, tokenEmbeddings, validReferenceVocab = null) {
-    console.log('🔬 Starting vocab purification with embedding similarity...');
-
-    // If no reference vocab provided, use words that look like actual English words
-    const referenceVocab = validReferenceVocab || Object.entries(corruptedVocab).filter(([_, word]) => {
-        return /^[a-z]+$/i.test(word) && word.length >= 3 && word.length <= 15;
-    }).reduce((acc, [id, word]) => ({ ...acc, [id]: word }), {});
-
-    const purified = {};
-    let healedCount = 0;
-
-    for (const [tokenIdStr, corruptedWord] of Object.entries(corruptedVocab)) {
-        const sourceEmb = tokenEmbeddings[tokenIdStr];
-        if (!sourceEmb) {
-            purified[tokenIdStr] = corruptedWord; // Keep as-is if no embedding
-            continue;
-        }
-
-        let bestMatch = corruptedWord;
-        let bestSimilarity = -1;
-
-        // Find closest reference word by embedding similarity
-        for (const [refTokenId, refWord] of Object.entries(referenceVocab)) {
-            if (refTokenId === tokenIdStr) continue; // Skip self
-
-            const refEmb = tokenEmbeddings[refTokenId];
-            if (!refEmb) continue;
-
-            const similarity = cosSimilarity(sourceEmb, refEmb);
-
-            if (similarity > bestSimilarity && similarity > 0.75) { // Similarity threshold
-                bestMatch = refWord;
-                bestSimilarity = similarity;
-            }
-        }
-
-        if (bestSimilarity > 0.75 && bestMatch !== corruptedWord) {
-            console.log(`🧽 Healed: "${corruptedWord}" → "${bestMatch}" (sim: ${bestSimilarity.toFixed(3)}) [${tokenIdStr}]`);
-            purified[tokenIdStr] = bestMatch;
-            healedCount++;
-        } else {
-            purified[tokenIdStr] = corruptedWord;
-        }
-    }
-
-    console.log(`✨ Vocab purification complete: ${healedCount} words healed, maintaining ${Object.keys(purified).length} total mappings`);
-    return purified;
-}
-
-// CONTINUAL LEARNING ÆTHER DECODER (Supports prior weights/vocab loading)
-class ContinualAetherDecoder {
-    constructor(vocabSize = 50257, hiddenDim = 304, maxLength = 15, priorDecoderData = null) {
+/**
+ * PHASE 2: SEMANTIC HANGMAN DECODER
+ * Now learns words FROM Phase 1 semantic embeddings!
+ */
+class SemanticHangmanDecoder {
+    constructor(vocabSize = 50257, hiddenDim = 512, maxLength = 15, embeddingDim = 1280) {
         this.vocabSize = vocabSize;
         this.hiddenDim = hiddenDim;
         this.maxLength = maxLength;
+        this.embeddingDim = embeddingDim; // Phase 1 semantic size
 
-        this.charVocab = " abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,!?;:'-\n\()[]{}/@#$%&*+=<>_";
+        this.charVocab = " abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.,!?;:'-\n\"()[]{}/@#$%&*+=<>_ØΞΘΙΛπΩΨ•⚡🎭🧶✨🎵🌟📋🎯🚀✅🏗️╔═╗║╚╝";
         this.numChars = this.charVocab.length;
 
         this.tokenPatterns = new Map();
         this.tokenMasks = new Map();
         this.vocab = new Map();
 
-        // DICTIONARY-ADDITIVE CONTINUAL LEARNING
-        // Fresh weights for consistent training, prior vocab as additive dictionary
+        // NEW: Store Phase 1 semantic embeddings per token (learned, not random!)
+        this.tokenSemanticEmbeddings = new Map(); // tokenId → Float32Array(1280)
 
-        console.log('   📚 Dictionary-additive approach: fresh training, growing knowledge');
-
-        // ALWAYS FRESH WEIGHTS - consistent training foundation
-        this.tokenEmbeddings = this.xavierInit(vocabSize, 128);
-        this.W_input_to_hidden = this.xavierInit(128 + maxLength + maxLength * this.numChars, hiddenDim);
+        // Input: semantic embedding (1280) + length + revealed pattern
+        const inputSize = embeddingDim + this.maxLength + this.maxLength * this.numChars;
+        this.W_input_to_hidden = this.xavierInit(inputSize, hiddenDim);
         this.b_hidden = new Float32Array(hiddenDim).fill(0);
 
         this.W_position_classifiers = [];
@@ -183,33 +53,6 @@ class ContinualAetherDecoder {
         for (let pos = 0; pos < maxLength; pos++) {
             this.W_position_classifiers.push(this.xavierInit(hiddenDim, this.numChars));
             this.b_position_classifiers.push(new Float32Array(this.numChars).fill(0));
-        }
-
-        // PRIOR VOCAB AS ADDITIVE DICTIONARY with EMBEDDING PURIFICATION
-        this.vocab = new Map();
-        if (priorDecoderData?.vocab) {
-            console.log(`   📚 Loading knowledge base: ${Object.keys(priorDecoderData.vocab).length} word mappings`);
-
-            // Access embeddings from prior decoder data for purification
-            const tokenEmbeddings = {};
-            if (priorDecoderData.weights?.tokenEmbeddings) {
-                // Convert to indexed object for easy lookup
-                const embeddingArray = priorDecoderData.weights.tokenEmbeddings;
-                for (let i = 0; i < embeddingArray.length; i += 128) {
-                    const tokenIdStr = Math.floor(i / 128).toString();
-                    tokenEmbeddings[tokenIdStr] = embeddingArray.slice(i, i + 128);
-                }
-                console.log(`   🎯 Embedding space accessible for vocab purification`);
-
-                // PURIFY VOCAB: Transform corrupted words to clean semantic equivalents
-                const purifiedVocab = purifyVocabWithEmbeddings(priorDecoderData.vocab, tokenEmbeddings);
-                this.vocab = new Map(Object.entries(purifiedVocab));
-            } else {
-                console.log(`   ⚠️ Embeddings not available, using vocab as-is`);
-                this.vocab = new Map(Object.entries(priorDecoderData.vocab));
-            }
-
-            console.log(`   ✓ Knowledge foundation ready: ${this.vocab.size} purified word mappings`);
         }
     }
 
@@ -225,6 +68,15 @@ class ContinualAetherDecoder {
     charToId(char) { return this.charVocab.indexOf(char); }
     idToChar(id) { return this.charVocab[id] || '?'; }
 
+    // Store Phase 1 semantic embedding for this token
+    setSemanticEmbedding(tokenId, embedding) {
+        this.tokenSemanticEmbeddings.set(tokenId, new Float32Array(embedding));
+    }
+
+    getSemanticEmbedding(tokenId) {
+        return this.tokenSemanticEmbeddings.get(tokenId) || new Float32Array(this.embeddingDim);
+    }
+
     getRevealedPattern(tokenId, length) {
         const pattern = this.tokenPatterns.get(tokenId) || new Array(this.maxLength).fill(-1);
         const mask = this.tokenMasks.get(tokenId) || new Array(this.maxLength).fill(false);
@@ -238,20 +90,20 @@ class ContinualAetherDecoder {
     }
 
     forward(tokenId, length) {
-        const tokenEmb = new Float32Array(128);
-        for (let i = 0; i < 128; i++) {
-            tokenEmb[i] = this.tokenEmbeddings[tokenId * 128 + i];
-        }
+        // Get Phase 1 semantic embedding (not random!)
+        const semanticEmb = this.getSemanticEmbedding(tokenId);
 
         const lengthOneHot = new Float32Array(this.maxLength).fill(0);
         if (length > 0 && length <= this.maxLength) lengthOneHot[length - 1] = 1.0;
 
         const revealedPattern = this.getRevealedPattern(tokenId, length);
-        const inputSize = 128 + this.maxLength + this.maxLength * this.numChars;
+
+        // Concatenate: semantic (1280) + length (15) + pattern (15*numChars)
+        const inputSize = this.embeddingDim + this.maxLength + this.maxLength * this.numChars;
         const input = new Float32Array(inputSize);
-        input.set(tokenEmb, 0);
-        input.set(lengthOneHot, 128);
-        input.set(revealedPattern, 128 + this.maxLength);
+        input.set(semanticEmb, 0);
+        input.set(lengthOneHot, this.embeddingDim);
+        input.set(revealedPattern, this.embeddingDim + this.maxLength);
 
         const hidden = new Float32Array(this.hiddenDim);
         for (let i = 0; i < this.hiddenDim; i++) {
@@ -271,7 +123,7 @@ class ContinualAetherDecoder {
                 for (let j = 0; j < this.hiddenDim; j++) {
                     sum += hidden[j] * this.W_position_classifiers[pos][j * this.numChars + i];
                 }
-                logits[i] = Math.max(Math.min(sum, 100), -100); // Clip to prevent overflow
+                logits[i] = sum;
             }
             charLogitsPerPosition.push(logits);
             charProbsPerPosition.push(this.softmax(logits));
@@ -316,20 +168,20 @@ class ContinualAetherDecoder {
     }
 
     lockWordInVocab(tokenId, word) {
-        if (!this.vocab.has(tokenId)) {
-            this.vocab.set(tokenId, word);
+        if (!this.vocab.has(word)) {
+            this.vocab.set(word, tokenId);
         }
     }
 
     async train(trainingData, options = {}) {
-        const { epochs = 100, hangmanRounds = 5, learningRate = 0.002 } = options;
-        let lr = learningRate;
+        const { epochs = 100, hangmanRounds = 5 } = options;
+        let learningRate = options.learningRate ?? 0.002;
 
-        console.log(`   Training ${trainingData.length} tokens with HANGMAN method`);
-        console.log(`   Epochs: ${epochs}, LR: ${lr}, Rounds: ${hangmanRounds}\n`);
+        console.log(`   Training ${trainingData.length} tokens with SEMANTIC HANGMAN`);
+        console.log(`   (Learning words FROM Phase 1 semantic embeddings!)`);
+        console.log(`   Epochs: ${epochs}, LR: ${learningRate}, Rounds: ${hangmanRounds}\n`);
 
-    for (let epoch = 0; epoch < epochs; epoch++) {
-
+        for (let epoch = 0; epoch < epochs; epoch++) {
             let totalLoss = 0, correctPredictions = 0, totalPositions = 0;
             let solvedWords = 0, totalReveals = 0;
 
@@ -370,7 +222,7 @@ class ContinualAetherDecoder {
                         totalPositions++;
                     }
 
-                    this.backward(result, word, length, lr, tokenId);
+                    this.backward(result, word, length, learningRate, tokenId);
 
                     if (this.isTokenSolved(tokenId, length)) {
                         this.lockWordInVocab(tokenId, word);
@@ -393,16 +245,16 @@ class ContinualAetherDecoder {
             }
 
             // Adaptive LR + Convergence
-            if (epoch > 10 && accuracy < 30 && lr > 1e-6) {
-                lr = Math.max(lr * 0.5, 1e-6);
+            if (epoch > 10 && accuracy < 30 && learningRate > 1e-6) {
+                learningRate = Math.max(learningRate * 0.5, 1e-6);
             }
-            if (epoch > 10 && accuracy < 30 && lr <= 0.00002) {
+            if (epoch > 10 && accuracy < 30 && learningRate <= 0.00002) {
                 console.log(`   🎯 CONVERGENCE - Training complete at epoch ${epoch}`);
                 break;
             }
         }
 
-        console.log(`   ✅ Decoder trained: ${this.vocab.size} words learned\n`);
+        console.log(`   ✅ Decoder trained: ${this.vocab.size} words learned FROM semantics!\n`);
     }
 
     backward(result, targetWord, length, learningRate, tokenId) {
@@ -445,11 +297,16 @@ class ContinualAetherDecoder {
 
     async save(filepath) {
         const data = {
-            version: '8.0-unified-hangman-cleaned',
-            architecture: { vocabSize: this.vocabSize, hiddenDim: this.hiddenDim, maxLength: this.maxLength, numChars: this.numChars },
+            version: '8.5-semantic-flow',
+            architecture: {
+                vocabSize: this.vocabSize,
+                hiddenDim: this.hiddenDim,
+                maxLength: this.maxLength,
+                numChars: this.numChars,
+                embeddingDim: this.embeddingDim
+            },
             charVocab: this.charVocab,
             weights: {
-                tokenEmbeddings: Array.from(this.tokenEmbeddings),
                 W_input_to_hidden: Array.from(this.W_input_to_hidden),
                 b_hidden: Array.from(this.b_hidden),
                 W_position_classifiers: this.W_position_classifiers.map(w => Array.from(w)),
@@ -457,197 +314,237 @@ class ContinualAetherDecoder {
             },
             vocab: Object.fromEntries(this.vocab),
             tokenPatterns: Object.fromEntries(this.tokenPatterns),
-            tokenMasks: Object.fromEntries(this.tokenMasks)
+            tokenMasks: Object.fromEntries(this.tokenMasks),
+            // Save semantic embeddings!
+            semanticEmbeddings: Object.fromEntries(
+                Array.from(this.tokenSemanticEmbeddings.entries()).map(([id, emb]) => [id, Array.from(emb)])
+            )
         };
         await fs.writeFile(filepath, JSON.stringify(data, null, 2));
+    }
+
+    async load(filepath) {
+        const data = JSON.parse(await fs.readFile(filepath, 'utf8'));
+
+        this.vocabSize = data.architecture.vocabSize;
+        this.hiddenDim = data.architecture.hiddenDim;
+        this.maxLength = data.architecture.maxLength;
+        this.numChars = data.architecture.numChars;
+        this.embeddingDim = data.architecture.embeddingDim || 1280;
+
+        this.charVocab = data.charVocab;
+
+        this.W_input_to_hidden = new Float32Array(data.weights.W_input_to_hidden);
+        this.b_hidden = new Float32Array(data.weights.b_hidden);
+        this.W_position_classifiers = data.weights.W_position_classifiers.map(w => new Float32Array(w));
+        this.b_position_classifiers = data.weights.b_position_classifiers.map(b => new Float32Array(b));
+
+        this.vocab = new Map(Object.entries(data.vocab));
+        this.tokenPatterns = new Map(Object.entries(data.tokenPatterns).map(([k, v]) => [parseInt(k), v]));
+        this.tokenMasks = new Map(Object.entries(data.tokenMasks).map(([k, v]) => [parseInt(k), v]));
+
+        // Load semantic embeddings
+        if (data.semanticEmbeddings) {
+            this.tokenSemanticEmbeddings = new Map(
+                Object.entries(data.semanticEmbeddings).map(([id, emb]) => [parseInt(id), new Float32Array(emb)])
+            );
+        }
     }
 }
 
 /**
- * REFERENCE-GUIDED CONTINUAL TRAINING PIPELINE
- * Loads previous model components as immutable reference for guiding new training
+ * UNIFIED PIPELINE WITH PROPER FLOW
  */
-class ContinualTrainingPipeline {
+class UnifiedAetherPipeline {
     constructor() {
         this.corpusPath = null;
-        this.referenceModelPath = null;  // Previous model loaded as reference, not training data
         this.outputPrefix = null;
         this.tokenizer = null;
-        this.gptTutor = null;
-
-        // IMMUTABLE REFERENCE DATA (loaded from previous model)
-        this.referenceEmbeddings = {};  // semanticEmbeddings by token ID for similarity
-        this.referenceVocabWordToToken = new Map();  // word → token ID mappings for duplicate prevention
-        this.referenceVocabTokenToWord = new Map();  // token ID → word mappings for lookup
-        this.nextTokenId = 0;  // Next available token ID after existing
+        this.extractor = null;
     }
 
-    /**
-     * Xavier weight initialization utility (from ContinualAetherDecoder)
-     */
-    xavierInit(inputDim, outputDim) {
-        const limit = Math.sqrt(6.0 / (inputDim + outputDim));
-        const weights = new Float32Array(inputDim * outputDim);
-        for (let i = 0; i < weights.length; i++) {
-            weights[i] = (Math.random() * 2 - 1) * limit;
-        }
-        return weights;
-    }
-
-    /**
-     * Load previous model components as immutable reference
-     */
-    async loadReferenceModel(referenceModelPath) {
-        console.log('📚 Loading previous model as immutable reference...');
-
-        // Load main model data
-        const referenceModel = JSON.parse(await fs.readFile(referenceModelPath, 'utf8'));
-        console.log(`   ✅ Loaded reference model: ${referenceModel.version}`);
-
-        // 1️⃣ SEMANTIC EMBEDDINGS - for semantic similarity guidance
-        this.referenceEmbeddings = referenceModel.semanticEmbeddings || {};
-        console.log(`   🎯 Reference embeddings: ${Object.keys(this.referenceEmbeddings).length} token→embedding mappings`);
-
-        // 2️⃣ VOCAB MAPPINGS - for duplicate prevention and consistency
-        const referenceVocab = referenceModel.ownVocab || {};
-        Object.entries(referenceVocab).forEach(([tokenIdStr, word]) => {
-            const tokenId = parseInt(tokenIdStr);
-            this.referenceVocabWordToToken.set(word, tokenId);
-            this.referenceVocabTokenToWord.set(tokenId, word);
-            this.nextTokenId = Math.max(this.nextTokenId, tokenId + 1);
-        });
-        console.log(`   📝 Reference vocab: ${this.referenceVocabWordToToken.size} word→token mappings`);
-        console.log(`   🏷️ Next available token ID: ${this.nextTokenId}`);
-
-        // 3️⃣ TOKENIZER PATTERNS - for consistent tokenization approach
-        // (Reference for how tokens were mapped previously, not as training data)
-
-        return referenceModel;
-    }
-
-    async initialize(corpusPath, referenceModelPath, outputPrefix = null) {
-        console.log('🔀 HYBRID CONTINUAL TRAINING v10.1');
-        console.log('=================================\n');
-
+    async initialize(corpusPath, outputPrefix = './unified-aether', oldModelPath = null) {
         this.corpusPath = corpusPath;
-        this.referenceModelPath = referenceModelPath;
-        this.outputPrefix = outputPrefix || `${referenceModelPath.replace('.json', '')}-evolution`;
+        this.outputPrefix = outputPrefix;
+        this.oldModelPath = oldModelPath;
+        this.oldModel = null;
 
-        console.log(`Teacher model: ${referenceModelPath}`);
-        console.log(`Expansion corpus: ${corpusPath}`);
-        console.log(`Output: ${this.outputPrefix}\n`);
-
-        // 🚀 Load AEther-Core as LoRA-adjacent foundation weights
-        await this.loadAetherCoreFoundation();
-
-        // Load full teacher model for measurement/compatibility
-        this.teacherModel = JSON.parse(await fs.readFile(referenceModelPath, 'utf8'));
-        console.log(`   ✅ Teacher model loaded: ${this.teacherModel.version}`);
-
-        // Load GPT tutor + tokenizer
-        console.log('🎓 Loading GPT semantic tutor...');
-        try {
-            const gen = await pipeline('text-generation', 'Models', { device: 'cpu' });
-            this.gptTutor = new B3EmbeddingExtractor(gen);
-            this.tokenizer = gen.tokenizer;
-            console.log('   ✅ GPT tutor ready\n');
-        } catch (e) {
-            console.error('   ❌ GPT tutor failed:', e.message);
-            process.exit(1);
+        if (this.oldModelPath && existsSync(this.oldModelPath)) {
+            console.log(`\n📦 Loading existing model for evolution: ${this.oldModelPath}`);
+            this.oldModel = JSON.parse(await fs.readFile(this.oldModelPath, 'utf8'));
+            console.log(`   ✓ Loaded version: ${this.oldModel.version}`);
         }
+
+        console.log('\n╔═══════════════════════════════════════════════════════════════╗');
+        console.log('║     ÆTHER UNIFIED TRAINING PIPELINE v2.2                      ║');
+        console.log('║     PROPER FLOW: Encoder → Decoder → Tokenizer               ║');
+        console.log('║     16-bit BPE vocab remapping preserved! <3                  ║');
+        console.log('╚═══════════════════════════════════════════════════════════════╝\n');
+
+        const content = await fs.readFile(corpusPath, 'utf8');
+        const lines = content.split('\n').filter(l => l.trim().length > 0);
+        const words = content.match(/\w+/g) || [];
+
+        console.log(`📂 Corpus: ${corpusPath}`);
+        console.log(`   Lines: ${lines.length}`);
+        console.log(`   Words: ${words.length}`);
+        console.log(`💾 Output: ${outputPrefix}\n`);
+
+        // Load GPT-2 tokenizer
+        console.log('🔧 Loading tokenizer...');
+        const gen = await pipeline('text-generation', 'Models', { device: 'cpu' });
+        this.tokenizer = gen.tokenizer;
+        this.extractor = new B3EmbeddingExtractor(gen);
+        console.log('   ✓ Tokenizer ready\n');
     }
 
-    /**
-     * Load aether-core as LoRA-adjacent foundation weights
-     */
-    async loadAetherCoreFoundation() {
-        console.log('🚀 Loading Aether-Core foundation weights (LoRA-adjacent)...');
+    async trainPhase1_AetherCore(options = {}) {
+        console.log('╔═══════════════════════════════════════════════════════════════╗');
+        console.log('║  PHASE 1: ÆTHER CORE (Learn Semantic Story Space)            ║');
+        console.log('╚═══════════════════════════════════════════════════════════════╝\n');
 
-        try {
-            // Load the complete aether-core weights
-            this.aetherCore = JSON.parse(await fs.readFile('./unified-aether-aether-core.json', 'utf8'));
-            console.log(`   ✅ Aether-Core foundation loaded: Sentence-level semantic weights`);
+        const { epochs = 600, learningRate = 0.02, hiddenSize = 512 } = options;
 
-            // These weights will be the foundation for all training
-            this.foundationWeights = this.aetherCore.weights;
-            console.log(`   🏗️ Foundation weights ready for iterative evolution`);
-
-        } catch (e) {
-            console.log('   ⚠️ Could not load aether-core, will initialize fresh foundation');
-            this.foundationWeights = null;
-        }
-        console.log('');
-    }
-
-    async trainPhase1_AetherEnhanced(options = {}) {
-        console.log('╔════════════════════════════════════════════════════════════════╗');
-        console.log('║  PHASE 1: ÆTHER CORE (Enhanced Teacher Embeddings)          ║');
-        console.log('╚════════════════════════════════════════════════════════════════╝\n');
-
-        const { epochs = 300, learningRate = 0.02, hiddenSize = 304 } = options;
         const pipeline = new B3TrainingPipeline();
         pipeline.teacherPipeline = { tokenizer: this.tokenizer };
         pipeline.extractor = this.extractor;
 
         const outputPath = `${this.outputPrefix}-aether-core.json`;
-        await pipeline.runFullPipeline(this.corpusPath, outputPath, {
-            epochs, learningRate, batchSize: 8, hiddenSize,
-            useCachedEmbeddings: false,
-            cacheFile: `${this.outputPrefix}-cache-aether.json`
-        });
+        const cacheFile = `${this.outputPrefix}-cache-aether.json`;
 
-        console.log(`Phase 1 complete: ${outputPath}\n`);
-        return outputPath;
+        if (this.oldModel) {
+            console.log('🧬 EVOLUTION MODE: Loading foundation weights from old model...');
+
+            // 2. Initialize Old Model (The Parent/Mirror)
+            const oldAether = new TinyMysticalModel(1280, hiddenSize);
+            if (this.oldModel.weights && this.oldModel.weights.W_aether_enc) {
+                oldAether.W1 = new Float32Array(this.oldModel.weights.W_aether_enc);
+                oldAether.b1 = new Float32Array(this.oldModel.weights.b_aether_enc);
+                oldAether.W2 = new Float32Array(this.oldModel.weights.W_aether_dec);
+                oldAether.b2 = new Float32Array(this.oldModel.weights.b_aether_dec);
+                console.log('   ✓ Loaded Old Aether (Parent) for Mirror Training');
+            }
+
+            // 3. Prepare Data with Mirror Logic (Socialising the Baby)
+            console.log('   🧬 Preparing Mirror Data (GPT + Old Model)...');
+            const sentences = await pipeline.loadCorpus(this.corpusPath);
+            // Use a temp cache file to avoid null error, we'll overwrite the real one later
+            const tempCacheFile = `${this.outputPrefix}-temp-raw.json`;
+            const rawPairs = await pipeline.prepareTrainingData(sentences, { batchSize: 8, cacheFile: tempCacheFile });
+
+            const mirrorPairs = rawPairs.map(p => {
+                const gptEmb = new Float32Array(p.input);
+                const oldOutput = oldAether.forward(gptEmb).output;
+
+                // Mix targets: 50% GPT (Truth), 50% Old Model (Tradition)
+                const mixedTarget = new Float32Array(1280);
+                for (let i = 0; i < 1280; i++) {
+                    mixedTarget[i] = (gptEmb[i] + oldOutput[i]) / 2;
+                }
+
+                return {
+                    input: gptEmb,
+                    target: mixedTarget,
+                    sentence: p.sentence
+                };
+            });
+
+            // 4. Initialize New Model with Old Weights (The Baby)
+            const tinyModel = new TinyMysticalModel(1280, hiddenSize);
+            tinyModel.W1 = new Float32Array(oldAether.W1);
+            tinyModel.b1 = new Float32Array(oldAether.b1);
+            tinyModel.W2 = new Float32Array(oldAether.W2);
+            tinyModel.b2 = new Float32Array(oldAether.b2);
+
+            // 5. Train (Fine-tune)
+            console.log(`   🚀 Evolving model on ${mirrorPairs.length} mirror samples...`);
+            await tinyModel.trainFromEmbeddings(mirrorPairs, {
+                epochs,
+                learningRate,
+                validationSplit: 0.1
+            });
+
+            // 6. Save
+            await tinyModel.save(outputPath);
+
+            // Save cache for Phase 2 (using the NEW model's embeddings!)
+            // We need to re-run the new model on the sentences to get the "evolved" embeddings for Phase 2
+            console.log('   📦 Generating evolved cache for Phase 2...');
+            const evolvedPairs = mirrorPairs.map(p => {
+                const reconstruction = tinyModel.forward(p.input).output;
+                return {
+                    input: Array.from(reconstruction), // This becomes the "input" for Phase 2
+                    target: Array.from(reconstruction),
+                    sentence: p.sentence
+                };
+            });
+
+            await fs.writeFile(cacheFile, JSON.stringify({ pairs: evolvedPairs }));
+
+            console.log(`✅ Phase 1 Evolution complete: ${outputPath}\n`);
+            return outputPath;
+
+        } else {
+            // Standard fresh training
+            await pipeline.runFullPipeline(this.corpusPath, outputPath, {
+                epochs,
+                learningRate,
+                batchSize: 8,
+                hiddenSize,
+                useCachedEmbeddings: false,
+                cacheFile: cacheFile
+            });
+
+            console.log(`✅ Phase 1 complete: ${outputPath}\n`);
+            return outputPath;
+        }
     }
 
     async trainPhase2_SemanticDecoder(options = {}) {
-        console.log('╔════════════════════════════════════════════════════════════════╗');
-        console.log('║  PHASE 2: SEMANTIC HANGMAN DECODER (Evolved Embeddings)     ║');
-        console.log('╚════════════════════════════════════════════════════════════════╝\n');
+        console.log('╔═══════════════════════════════════════════════════════════════╗');
+        console.log('║  PHASE 2: SEMANTIC HANGMAN DECODER                            ║');
+        console.log('║  (Learn words FROM Phase 1 semantic embeddings!)              ║');
+        console.log('╚═══════════════════════════════════════════════════════════════╝\n');
 
-        const { maxSamples = 5000, hiddenDim = 304, epochs = 80, learningRate = 0.002 } = options;
+        const { maxSamples = 5000, hiddenDim = 512, epochs = 100, learningRate = 0.002 } = options;
 
-        // Load Phase 1 sentence embedding cache
+        // Load Phase 1 semantic embeddings cache
         const cacheFile = `${this.outputPrefix}-cache-aether.json`;
-        console.log('📦 Loading Phase 1 sentence embeddings for semantic evolution...');
+        console.log('📦 Loading Phase 1 sentence embeddings...');
 
-        let phase1Embeddings = null;
+        let cache = null;
         try {
             const cacheContent = await fs.readFile(cacheFile, 'utf8');
-            const cache = JSON.parse(cacheContent);
-            phase1Embeddings = cache.pairs?.map(p => ({
-                input: new Float32Array(p.input),
-                target: new Float32Array(p.target),
-                sentence: p.sentence || ''
-            })) || [];
-            console.log(`   ✓ Loaded ${phase1Embeddings.length} sentence embedding pairs from Phase 1`);
+            cache = JSON.parse(cacheContent);
+            console.log(`   ✓ Loaded ${cache.pairs?.length || 0} sentence embedding pairs from Phase 1\n`);
         } catch (e) {
             console.error('   ❌ Cannot find Phase 1 cache! Run Phase 1 first.');
-            throw new Error('Phase 1 cache required for semantic evolution');
+            throw new Error('Phase 1 cache required for semantic flow');
         }
 
-        if (!phase1Embeddings || phase1Embeddings.length === 0) {
+        if (!cache.pairs || cache.pairs.length === 0) {
             throw new Error('Phase 1 cache has no embedding pairs!');
         }
 
-        // Load corpus to map sentences to words
+        // Load corpus to map sentences
+        console.log('📖 Loading corpus to extract sentence-word mappings...');
         const content = await fs.readFile(this.corpusPath, 'utf8');
         const sentences = content
             .split('\n')
             .map(s => s.trim())
             .filter(s => s.length > 10);
 
-        // Extract words and build word→sentences map (for averaging embeddings)
-        const rawWords = content.match(/[a-zA-Z]+/g) || [];
+        console.log(`   Found ${sentences.length} sentences in corpus`);
+
+        // Extract words and build word→sentences map
+        const rawWords = content.match(/[\wØΞΘΙΛπΩΨ]+|[^\s\w]/gu) || [];
         const limitedWords = rawWords.filter(w => w.length > 0 && w.length <= 15).map(w => w.toLowerCase()).slice(0, maxSamples);
         const uniqueWords = [...new Set(limitedWords)];
 
         console.log(`   Found ${rawWords.length} raw words → ${uniqueWords.length} unique samples`);
 
-        // Build word→sentence indices map for semantic evolution
+        // Build word→sentence indices map
         const wordToSentenceIndices = new Map();
-        const sentenceToIndex = new Map(sentences.map((s, i) => [s, i]));
-
         for (const word of uniqueWords) {
             const indices = [];
             for (let i = 0; i < sentences.length; i++) {
@@ -660,38 +557,39 @@ class ContinualTrainingPipeline {
             }
         }
 
-        console.log(`   Mapped ${wordToSentenceIndices.size} words to sentences for embedding evolution\n`);
+        console.log(`   Mapped ${wordToSentenceIndices.size} words to sentences\n`);
 
-        // EVOLVE semantics: Build word-level embeddings by averaging sentence embeddings
-        console.log('🧮 Evolving Phase 1 embeddings into word-level semantics...');
-        const evolvedSemantics = new Map();
+        // Build word→semantic embedding by averaging sentence embeddings
+        console.log('🧮 Computing word-level embeddings from sentence embeddings...');
+        const wordToSemanticEmbedding = new Map();
 
         for (const [word, sentenceIndices] of wordToSentenceIndices.entries()) {
-            const embeddingSum = new Float32Array(768).fill(0);
+            const embeddingSum = new Float32Array(1280).fill(0);
             let validCount = 0;
 
-            for (const idx of sentenceIndices) {
-                if (idx < phase1Embeddings.length) {
-                    const sentenceEmbedding = phase1Embeddings[idx].input;
-                    for (let i = 0; i < 768; i++) {
-                        embeddingSum[i] += sentenceEmbedding[i];
+                    for (const idx of sentenceIndices) {
+                        if (idx < cache.pairs.length) {
+                            const sentenceEmbedding = new Float32Array(cache.pairs[idx].input);
+                            for (let i = 0; i < 1280; i++) {
+                                embeddingSum[i] += sentenceEmbedding[i];
+                            }
+                            validCount++;
+                        }
                     }
-                    validCount++;
-                }
-            }
 
             if (validCount > 0) {
-                const avgEmbedding = new Float32Array(768);
-                for (let i = 0; i < 768; i++) {
+                // Average the embeddings
+                const avgEmbedding = new Float32Array(1280);
+                for (let i = 0; i < 1280; i++) {
                     avgEmbedding[i] = embeddingSum[i] / validCount;
                 }
-                evolvedSemantics.set(word, avgEmbedding);
+                wordToSemanticEmbedding.set(word, avgEmbedding);
             }
         }
 
-        console.log(`   ✅ Evolved semantics: ${evolvedSemantics.size} words with Phase 1 → Phase 2 embeddings\n`);
+        console.log(`   ✓ Created ${wordToSemanticEmbedding.size} word-level semantic embeddings\n`);
 
-        // Build training data WITH evolved semantic embeddings
+        // Build training data WITH Phase 1 semantic embeddings
         const trainingData = [];
         const usedTokens = new Set();
 
@@ -700,10 +598,10 @@ class ContinualTrainingPipeline {
                 const tokenIds = await this.tokenizer.encode(word);
                 const tokenId = tokenIds[0];
 
-                // Only include words that have evolved semantics!
-                if (!usedTokens.has(tokenId) && evolvedSemantics.has(word)) {
+                // Only include words that have semantic embeddings!
+                if (!usedTokens.has(tokenId) && wordToSemanticEmbedding.has(word)) {
                     usedTokens.add(tokenId);
-                    const semanticEmbedding = evolvedSemantics.get(word);
+                    const semanticEmbedding = wordToSemanticEmbedding.get(word);
 
                     trainingData.push({
                         tokenId,
@@ -712,15 +610,14 @@ class ContinualTrainingPipeline {
                         semanticEmbedding
                     });
                 }
-            } catch {}
+            } catch { }
         }
 
-        console.log(`   Created ${trainingData.length} training samples with evolved semantics\n`);
+        console.log(`   Created ${trainingData.length} training samples with Phase 1 semantics\n`);
 
-        // Create SemanticHangmanDecoder using evolved embeddings
-        const decoder = new SemanticHangmanDecoder(50257, HIDDEN_SIZE, 15, 768);
+        const decoder = new SemanticHangmanDecoder(50257, hiddenDim, 15, 1280);
 
-        // Store evolved semantic embeddings in decoder
+        // Store Phase 1 semantic embeddings in decoder
         for (const { tokenId, semanticEmbedding } of trainingData) {
             decoder.setSemanticEmbedding(tokenId, semanticEmbedding);
         }
@@ -731,75 +628,153 @@ class ContinualTrainingPipeline {
             hangmanRounds: 5
         });
 
-        // Store evolved semantics for Phase 3
-        decoder.evolvedSemantics = Object.fromEntries(
-            Array.from(evolvedSemantics.entries()).map(([word, emb]) => [word, Array.from(emb)])
-        );
+        // 🎯 CREATE GPT-TO-OWN MAPPING HERE (Phase 2, not Phase 3!)
+        console.log('📋 Creating 16-bit BPE remapping (GPT → own IDs)...');
+        const learnedWords = Array.from(decoder.vocab.entries()); // [[word, gptId], ...]
+        const gptToOwn = {};
+        const ownVocab = {}; // ownId → word
+
+        learnedWords.forEach(([word, gptId], ownId) => {
+            gptToOwn[gptId] = ownId;
+            ownVocab[ownId] = word;
+        });
+
+        // Save both mappings
+        await fs.writeFile(`${this.outputPrefix}-gpt-to-own.json`, JSON.stringify(gptToOwn));
+        await fs.writeFile(`${this.outputPrefix}-own-vocab.json`, JSON.stringify(ownVocab));
+
+        console.log(`   ✓ Created ${Object.keys(gptToOwn).length} token mappings`);
+        console.log(`   ✓ Saved: ${this.outputPrefix}-gpt-to-own.json`);
+        console.log(`   ✓ Saved: ${this.outputPrefix}-own-vocab.json\n`);
+        // 🎯 CREATE OWN-ID SEMANTIC EMBEDDINGS (dual indexed)
+        console.log('🧠 Building own_ID semantic embeddings from GPT_ID semantics...');
+
+        const semanticEmbeddingsOwnId = {};   // own_ID → embedding array
+
+        const ordered = Array.from(decoder.vocab.entries()); // [word → gptId], ordered by learning
+        ordered.forEach(([word, gptId], ownId) => {
+            const emb = decoder.tokenSemanticEmbeddings.get(parseInt(gptId));
+            if (emb) {
+                semanticEmbeddingsOwnId[ownId] = Array.from(emb);
+                if (ownId < 5) console.log(`   ${ownId}: ${word} (GPT:${gptId}) → semantic ✓`);
+            }
+        });
+
+        decoder.semanticEmbeddingsOwnId = semanticEmbeddingsOwnId;
+
+        console.log(`   ✓ Created ${Object.keys(semanticEmbeddingsOwnId).length} own_ID semantic embeddings\n`);
 
         const outputPath = `${this.outputPrefix}-decoder.json`;
         await decoder.save(outputPath);
 
-        console.log(`Phase 2 complete: ${outputPath}`);
-        console.log(`   Semantic evolution: Phase 1 sentence embeddings → evolved word semantics`);
-        console.log(`   Decoder trained: ${decoder.vocab.size} words with evolved embeddings\n`);
+        console.log(`✅ Phase 2 complete: ${outputPath}\n`);
         return outputPath;
     }
 
-// Replace trainPhase3_PredictorEnhanced in continual-training.js
-// NOW WITH CHECKPOINT-REWIND for continual learning! 🔄
-
-    async trainPhase3_PredictorEnhanced(decoderPath, options = {}) {
+    async trainPhase2_5_Grammar(decoderPath, options = {}) {
         console.log('╔═══════════════════════════════════════════════════════════════╗');
-        console.log('║  PHASE 3: TOKEN PREDICTOR (Sonnet-Level Split + Checkpoint-Rewind) ║');
+        console.log('║  PHASE 2.5: GRAMMAR INDUCTION (Unsupervised Structure)       ║');
+        console.log('╚═══════════════════════════════════════════════════════════════╝\n');
+
+        const { numClusters = 64 } = options;
+
+        // Load decoder to get semantic embeddings
+        const decoderData = JSON.parse(await fs.readFile(decoderPath, 'utf8'));
+
+        // Reconstruct word -> embedding map
+        const wordToSemanticEmbedding = new Map();
+        if (decoderData.semanticEmbeddings) {
+            // Map GPT IDs back to words to get embeddings
+            const gptIdToWord = new Map();
+            for (const [word, id] of Object.entries(decoderData.vocab)) {
+                gptIdToWord.set(parseInt(id), word);
+            }
+
+            for (const [id, emb] of Object.entries(decoderData.semanticEmbeddings)) {
+                const word = gptIdToWord.get(parseInt(id));
+                if (word) {
+                    wordToSemanticEmbedding.set(word, new Float32Array(emb));
+                }
+            }
+        }
+
+        if (wordToSemanticEmbedding.size === 0) {
+            throw new Error("No semantic embeddings found in decoder for grammar induction!");
+        }
+
+        // Initialize and train grammar inductor
+        const grammar = new GrammarInductor(numClusters, 768);
+        await grammar.trainClusters(wordToSemanticEmbedding);
+
+        // Load corpus for transition training
+        const content = await fs.readFile(this.corpusPath, 'utf8');
+        const sentences = content
+            .split('\n')
+            .map(s => s.trim())
+            .filter(s => s.length > 10)
+            .map(s => s.match(/[\wØΞΘΙΛπΩΨ]+|[^\s\w]/gu)?.map(w => w.toLowerCase()) || []); // Enhanced tokenization for grammar
+
+        grammar.trainTransitions(sentences);
+
+        const outputPath = `${this.outputPrefix}-grammar.json`;
+        await grammar.save(outputPath);
+
+        console.log(`✅ Phase 2.5 complete: ${outputPath}\n`);
+        return outputPath;
+    }
+
+    async trainPhase3_TokenPredictor(decoderPath, grammarPath, options = {}) {
+        console.log('╔═══════════════════════════════════════════════════════════════╗');
+        console.log('║  PHASE 3: TOKEN PREDICTOR (Mouth to Tell the Story!)         ║');
         console.log('╚═══════════════════════════════════════════════════════════════╝\n');
 
         const {
-            batchSizeSonnets = 5,
-            batchEpochs = 3,
-            learningRate = 0.00025,
-            patience = 2,
+            learningRate = 0.0002,
+            hiddenSize = 512,
             interruptMs = 428.57,
-            interruptBatch,
+            patience = 2,
+            batchSizeSonnets = 50,
+            batchEpochs = 3,
             validationSplit = 0.175
         } = options;
 
-        // Load fresh decoder vocab for coherence reference
-        const freshDecoderData = JSON.parse(await fs.readFile(decoderPath, 'utf8'));
-        const freshVocab = new Map(Object.entries(freshDecoderData.vocab || {}));
-        const initialVocabSize = this.priorDecoderData ? Object.keys(this.priorDecoderData.vocab || {}).length : 0;
-        console.log(`📖 Fresh decoder vocabulary: ${freshVocab.size} words (+${freshVocab.size - initialVocabSize} learned)\n`);
+        // Load decoder (which has Phase 1 semantics!)
+        const decoderData = JSON.parse(await fs.readFile(decoderPath, 'utf8'));
 
-        // Load evolved semantics from Phase 2
-        const evolvedSemantics = new Map();
-        if (freshDecoderData.evolvedSemantics) {
-            for (const [word, emb] of Object.entries(freshDecoderData.evolvedSemantics)) {
-                evolvedSemantics.set(word, new Float32Array(emb));
-            }
-            console.log(`   🔄 Loaded evolved semantics: ${evolvedSemantics.size} words with Phase 1→2 embeddings\n`);
-        } else {
-            console.log(`   ⚠️ No evolved semantics found in decoder, will use synthetic embeddings\n`);
-        }
+        // 16-bit BPE vocab remapping (YOUR FUTURE! <3)
+        const learnedEntries = Array.from(Object.entries(decoderData.vocab));
+        const gptToOwn = {};
+        learnedEntries.forEach(([word, gptId], i) => {
+            gptToOwn[gptId] = i;
+            decoderData.vocab[i] = word;
+        });
 
-        // Tally tokenization patterns from classification observation
-        if (this.classifier) {
-            const tokenTally = {};
-            const corpusLines = (await fs.readFile(this.corpusPath, 'utf8')).split('\n').slice(0, 100).filter(l => l.trim());
-            for (const line of corpusLines) {
-                if (line.trim()) {
-                    try {
-                        const result = await this.classifier(line.trim());
-                        const tokens = await this.tokenizer.encode(line.trim());
-                        for (const token of tokens) {
-                            tokenTally[token] = (tokenTally[token] || 0) + 1;
-                        }
-                    } catch (e) {}
+        await fs.writeFile(`${this.outputPrefix}-gpt-to-own.json`, JSON.stringify(gptToOwn));
+
+        const newVocabSize = Object.keys(decoderData.vocab).length;
+        const wordToId = new Map(Object.entries(decoderData.vocab).map(([id, w]) => [w, parseInt(id)]));
+        console.log(`📖 16-bit vocab remapped: ${newVocabSize} words (0-${newVocabSize - 1}) <3\n`);
+
+        // Load Phase 1 semantic embeddings from decoder
+        const wordToSemanticEmbedding = new Map();
+        if (decoderData.semanticEmbeddings) {
+            for (const [ownId, word] of Object.entries(decoderData.vocab)) {
+                // Find GPT ID for this word
+                const gptId = learnedEntries.find(([w, _]) => w === word)?.[1];
+                if (gptId && decoderData.semanticEmbeddings[gptId]) {
+                    wordToSemanticEmbedding.set(word, new Float32Array(decoderData.semanticEmbeddings[gptId]));
                 }
             }
-            console.log('🎯 Tokenization tally from classification: ', Object.keys(tokenTally).slice(0, 10), '...');
+            console.log(`   ✓ Loaded ${wordToSemanticEmbedding.size} semantic embeddings from Phase 2\n`);
         }
 
-        // Prepare sonnets
-        console.log('🔍 Preparing sonnets from corpus...');
+        // Load Grammar Model
+        const grammar = new GrammarInductor();
+        await grammar.load(grammarPath);
+        console.log(`   ✓ Loaded Grammar Model (${grammar.numClusters} clusters)`);
+
+        // Extract sonnets
+        console.log('📜 Extracting sonnets from corpus...');
         const content = await fs.readFile(this.corpusPath, 'utf8');
         const lines = content.split('\n').map(l => l.trim()).filter(l => l.length > 10);
         const sonnets = [];
@@ -809,21 +784,11 @@ class ContinualTrainingPipeline {
                 sonnets.push(sonnetLines.join(' '));
             }
         }
+        console.log(`📚 Loaded ${sonnets.length} sonnets from corpus\n`);
 
-        console.log(`📚 Loaded ${sonnets.length} sonnets from corpus`);
-
-        // Create persistent predictor for cumulative learning across batches
-        const predictor = new TinyTokenPredictor(50257, 768, HIDDEN_SIZE);
-
-        // Warm start from prior predictor (CONTINUAL LEARNING!)
-        if (this.teacherModel.weights.W_token_1) {
-            predictor.W1 = new Float32Array(this.teacherModel.weights.W_token_1);
-            predictor.b1 = new Float32Array(this.teacherModel.weights.b_token_1);
-            predictor.W2 = new Float32Array(this.teacherModel.weights.W_token_2);
-            predictor.b2 = new Float32Array(this.teacherModel.weights.b_token_2);
-            predictor.isInitialized = true;
-            console.log('   ♻️ Warm start from prior predictor\n');
-        }
+        // Create predictor with 16-bit vocab size AND grammar context
+        // Input size = 1280 (Semantic) + 64 (Grammar Context) = 1344
+        const predictor = new TinyTokenPredictor(newVocabSize, 1280 + grammar.numClusters, hiddenSize);
 
         let totalPairsProcessed = 0;
         const numBatches = Math.ceil(sonnets.length / batchSizeSonnets);
@@ -834,119 +799,458 @@ class ContinualTrainingPipeline {
 
             console.log(`\n📦 Batch ${batchIdx + 1}/${numBatches}: ${batchSonnets.length} sonnets`);
 
-            // CRITICAL FIX: Split sonnets FIRST, then create pairs
             const numVal = Math.max(1, Math.floor(batchSonnets.length * validationSplit));
             const numTrain = batchSonnets.length - numVal;
 
-            // Shuffle sonnets
             const shuffledSonnets = [...batchSonnets].sort(() => Math.random() - 0.5);
             const trainSonnets = shuffledSonnets.slice(0, numTrain);
             const valSonnets = shuffledSonnets.slice(numTrain);
 
-            console.log(`   🧩 Sonnet split: ${trainSonnets.length} train | ${valSonnets.length} val`);
+            console.log(`   🧩 Split: ${trainSonnets.length} train | ${valSonnets.length} val`);
 
-            // Create training pairs from TRAIN sonnets only - using evolved semantics
+            // TRAINING PAIRS: Use semantic flow from Phase 1→2
             const trainingPairs = [];
             for (let i = 0; i < trainSonnets.length; i++) {
                 if (i % 10 === 0) console.log(`      Processing train sonnet ${i}/${trainSonnets.length}`);
 
                 const sonnet = trainSonnets[i];
-                try {
-                    const words = sonnet.split(/\s+/).filter(w => w.length > 0).map(w => w.toLowerCase());
-                    const tokenIds = words.map(w => {
-                        // Look up token ID from fresh vocab
-                        for (const [ownId, word] of Object.entries(freshDecoderData.vocab)) {
-                            if (word === w) return parseInt(ownId);
-                        }
-                        return undefined;
-                    }).filter(id => id !== undefined);
+                const words = sonnet.split(/\s+/).filter(w => w.length > 0).map(w => w.toLowerCase());
+                const tokenIds = words.map(w => wordToId.get(w)).filter(id => id !== undefined);
 
-                    if (tokenIds.length < 2) continue;
+                if (tokenIds.length < 2) continue;
 
-                    for (let j = 0; j < tokenIds.length - 1; j++) {
-                        const contextWord = words[j];
-                        let embedding;
+                for (let j = 0; j < tokenIds.length - 1; j++) {
+                    const currentWord = words[j];
 
-                        // Use evolved semantics if available
-                        if (evolvedSemantics.has(contextWord)) {
-                            embedding = evolvedSemantics.get(contextWord);
-                        } else {
-                            // Fallback to synthetic
-                            embedding = this.extractor.createSyntheticEmbedding(contextWord);
-                        }
+                    // Use Phase 1 semantics (flowed through Phase 2!)
+                    const embedding = wordToSemanticEmbedding.get(currentWord);
 
+                    if (embedding) {
                         const targetTokenId = tokenIds[j + 1];
-                        trainingPairs.push({ embedding, targetTokenId });
+
+                        // Get Grammar Context: Probability distribution of NEXT cluster
+                        // based on CURRENT word's cluster
+                        const currentCluster = grammar.getClusterForWord(currentWord);
+                        const grammarContext = grammar.getNextClusterProbs(currentCluster); // Float32Array(64)
+
+                        // Combine: Semantic (1280) + Grammar (64)
+                        const combinedInput = new Float32Array(1280 + grammar.numClusters);
+                        combinedInput.set(embedding, 0);
+                        combinedInput.set(grammarContext, 1280);
+
+                        trainingPairs.push({ embedding: combinedInput, targetTokenId });
                     }
-                } catch (error) {}
+                }
             }
 
-            // Create validation pairs from VAL sonnets only - using evolved semantics
+            // VALIDATION PAIRS: Same semantic flow
             const validationPairs = [];
             for (let i = 0; i < valSonnets.length; i++) {
                 if (i % 10 === 0) console.log(`      Processing val sonnet ${i}/${valSonnets.length}`);
 
                 const sonnet = valSonnets[i];
-                try {
-                    const words = sonnet.split(/\s+/).filter(w => w.length > 0).map(w => w.toLowerCase());
-                    const tokenIds = words.map(w => {
-                        // Look up token ID from fresh vocab
-                        for (const [ownId, word] of Object.entries(freshDecoderData.vocab)) {
-                            if (word === w) return parseInt(ownId);
-                        }
-                        return undefined;
-                    }).filter(id => id !== undefined);
+                const words = sonnet.split(/\s+/).filter(w => w.length > 0).map(w => w.toLowerCase());
+                const tokenIds = words.map(w => wordToId.get(w)).filter(id => id !== undefined);
 
-                    if (tokenIds.length < 2) continue;
+                if (tokenIds.length < 2) continue;
 
-                    for (let j = 0; j < tokenIds.length - 1; j++) {
-                        const contextWord = words[j];
-                        let embedding;
+                for (let j = 0; j < tokenIds.length - 1; j++) {
+                    const currentWord = words[j];
 
-                        // Use evolved semantics if available
-                        if (evolvedSemantics.has(contextWord)) {
-                            embedding = evolvedSemantics.get(contextWord);
-                        } else {
-                            // Fallback to synthetic
-                            embedding = this.extractor.createSyntheticEmbedding(contextWord);
-                        }
+                    const embedding = wordToSemanticEmbedding.get(currentWord);
 
+                    if (embedding) {
                         const targetTokenId = tokenIds[j + 1];
-                        validationPairs.push({ embedding, targetTokenId });
+
+                        const currentCluster = grammar.getClusterForWord(currentWord);
+                        const grammarContext = grammar.getNextClusterProbs(currentCluster);
+
+                        const combinedInput = new Float32Array(1280 + grammar.numClusters);
+                        combinedInput.set(embedding, 0);
+                        combinedInput.set(grammarContext, 1280);
+
+                        validationPairs.push({ embedding: combinedInput, targetTokenId });
                     }
-                } catch (error) {}
+                }
             }
 
             console.log(`   📊 Pairs: ${trainingPairs.length} train | ${validationPairs.length} val`);
             totalPairsProcessed += trainingPairs.length + validationPairs.length;
 
-            // Train on this batch with PROPER validation set
+            // Train batch
             await this.trainBossFight(predictor, trainingPairs, validationPairs, {
                 epochs: batchEpochs,
                 learningRate,
                 interruptMs,
-                interruptBatch: DEFAULT_CONFIG.predictorPhiComplexity,
+                interruptBatch: 0.314159,
                 patience
             });
 
             console.log(`      ✅ Batch ${batchIdx + 1} complete\n`);
         }
 
-        console.log(`\n🎯 Cumulative training complete: ${sonnets.length} sonnets, ${totalPairsProcessed} total pairs`);
+        console.log(`\n🎯 Training complete: ${sonnets.length} sonnets, ${totalPairsProcessed} total pairs`);
 
         const outputPath = `${this.outputPrefix}-predictor.json`;
         await predictor.save(outputPath);
-        console.log(`Phase 3 complete: ${outputPath}\n`);
+        console.log(`✅ Phase 3 complete: ${outputPath}\n`);
         return outputPath;
     }
 
-    // NEW: Separate boss-fight training method with pre-split data
+    async trainPhase3_5_TextGeneration(decoderPath, grammarPath, predictorPath, options = {}) {
+        console.log('╔═══════════════════════════════════════════════════════════════╗');
+        console.log('║  PHASE 3.5: TEXT GENERATION (Mirror Pipeline!)               ║');
+        console.log('║  60% Phase 3 Predictor + 40% GPT = Generation Model          ║');
+        console.log('╚═══════════════════════════════════════════════════════════════╝\n');
+
+        const {
+            learningRate = 0.0004,
+            hiddenSize = 512,
+            interruptMs = 428.57,
+            patience = 2,
+            batchSizeSonnets = 50,
+            batchEpochs = 3,
+            validationSplit = 0.25,
+            phase3Weight = 0.4,  // 60% Phase 3 (our tokenizer)
+            gptWeight = 0.6      // 40% GPT teacher
+        } = options;
+
+        // Load decoder (which has Phase 1 semantics!)
+        const decoderData = JSON.parse(await fs.readFile(decoderPath, 'utf8'));
+
+        // 16-bit BPE vocab remapping - EXACTLY SAME AS PHASE 3
+        const learnedEntries = Array.from(Object.entries(decoderData.vocab));
+        const gptToOwn = {};
+        learnedEntries.forEach(([word, gptId], i) => {
+            gptToOwn[gptId] = i;
+            decoderData.vocab[i] = word;  // Remap to [ownId → word]
+        });
+
+        const newVocabSize = Object.keys(decoderData.vocab).length;
+        const wordToId = new Map(Object.entries(decoderData.vocab).map(([id, w]) => [w, parseInt(id)]));
+        console.log(`📖 16-bit vocab remapped: ${newVocabSize} words (0-${newVocabSize - 1}) <3\n`);
+
+        // Load Phase 1 semantic embeddings from decoder - EXACTLY SAME AS PHASE 3
+        const wordToSemanticEmbedding = new Map();
+        if (decoderData.semanticEmbeddings) {
+            for (const [ownId, word] of Object.entries(decoderData.vocab)) {
+                // Find GPT ID for this word
+                const gptId = learnedEntries.find(([w, _]) => w === word)?.[1];
+                if (gptId && decoderData.semanticEmbeddings[gptId]) {
+                    wordToSemanticEmbedding.set(word, new Float32Array(decoderData.semanticEmbeddings[gptId]));
+                }
+            }
+            console.log(`   ✓ Loaded ${wordToSemanticEmbedding.size} semantic embeddings from Phase 2\n`);
+        }
+
+        // Load Grammar Model
+        const grammar = new GrammarInductor();
+        await grammar.load(grammarPath);
+        console.log(`   ✓ Loaded Grammar Model (${grammar.numClusters} clusters)`);
+
+        // 🧬 MIRROR PIPELINE: Load Phase 3 predictor as teacher
+        console.log('🧬 MIRROR MODE: Loading Phase 3 predictor as teacher...');
+        const phase3Data = JSON.parse(await fs.readFile(predictorPath, 'utf8'));
+        const phase3Predictor = new TinyTokenPredictor(
+            phase3Data.architecture.vocabSize,
+            phase3Data.architecture.embeddingSize,
+            phase3Data.architecture.hiddenSize
+        );
+        phase3Predictor.W1 = new Float32Array(phase3Data.weights.W1);
+        phase3Predictor.b1 = new Float32Array(phase3Data.weights.b1);
+        phase3Predictor.W2 = new Float32Array(phase3Data.weights.W2);
+        phase3Predictor.b2 = new Float32Array(phase3Data.weights.b2);
+        console.log(`   ✓ Phase 3 Teacher loaded (${phase3Predictor.vocabSize} vocab)`);
+        console.log(`   🔮 Mix ratio: ${phase3Weight * 100}% Phase 3 + ${gptWeight * 100}% GPT\n`);
+
+        // Extract sonnets
+        console.log('📜 Extracting sonnets from corpus...');
+        const content = await fs.readFile(this.corpusPath, 'utf8');
+        const lines = content.split('\n').map(l => l.trim()).filter(l => l.length > 10);
+        const sonnets = [];
+        for (let i = 0; i < lines.length; i += 14) {
+            const sonnetLines = lines.slice(i, Math.min(i + 14, lines.length));
+            if (sonnetLines.length >= 10) {
+                sonnets.push(sonnetLines.join(' '));
+            }
+        }
+        console.log(`📚 Loaded ${sonnets.length} sonnets from corpus\n`);
+
+        // Create NEW text generation predictor (the student)
+        const textgenPredictor = new TinyTokenPredictor(newVocabSize, 1280 + grammar.numClusters, hiddenSize);
+
+        // Initialize student with Phase 3 teacher weights (warm start)
+        textgenPredictor.W1 = new Float32Array(phase3Predictor.W1);
+        textgenPredictor.b1 = new Float32Array(phase3Predictor.b1);
+        textgenPredictor.W2 = new Float32Array(phase3Predictor.W2);
+        textgenPredictor.b2 = new Float32Array(phase3Predictor.b2);
+        console.log('   ✓ Student initialized with Phase 3 teacher weights\n');
+
+        let totalPairsProcessed = 0;
+        const numBatches = Math.ceil(sonnets.length / batchSizeSonnets);
+
+        for (let batchIdx = 0; batchIdx < numBatches; batchIdx++) {
+            const batchStart = batchIdx * batchSizeSonnets;
+            const batchSonnets = sonnets.slice(batchStart, batchStart + batchSizeSonnets);
+
+            console.log(`\n📦 Batch ${batchIdx + 1}/${numBatches}: ${batchSonnets.length} sonnets`);
+
+            const numVal = Math.max(1, Math.floor(batchSonnets.length * validationSplit));
+            const numTrain = batchSonnets.length - numVal;
+
+            const shuffledSonnets = [...batchSonnets].sort(() => Math.random() - 0.5);
+            const trainSonnets = shuffledSonnets.slice(0, numTrain);
+            const valSonnets = shuffledSonnets.slice(numTrain);
+
+            console.log(`   🧩 Split: ${trainSonnets.length} train | ${valSonnets.length} val`);
+
+            // 🧬 MIRROR TRAINING PAIRS: Mix Phase 3 predictions with GPT targets
+            const trainingPairs = [];
+            for (let i = 0; i < trainSonnets.length; i++) {
+                if (i % 10 === 0) console.log(`      Processing train sonnet ${i}/${trainSonnets.length}`);
+
+                const sonnet = trainSonnets[i];
+                const words = sonnet.split(/\s+/).filter(w => w.length > 0).map(w => w.toLowerCase());
+                const tokenIds = words.map(w => wordToId.get(w)).filter(id => id !== undefined);
+
+                if (tokenIds.length < 2) continue;
+
+                for (let j = 0; j < tokenIds.length - 1; j++) {
+                    const currentWord = words[j];
+                    const embedding = wordToSemanticEmbedding.get(currentWord);
+
+                    if (embedding) {
+                        const gptTargetTokenId = tokenIds[j + 1]; // GPT's "ground truth" (40%)
+
+                        // Get Grammar Context
+                        const currentCluster = grammar.getClusterForWord(currentWord);
+                        const grammarContext = grammar.getNextClusterProbs(currentCluster);
+
+                        // Combine: Semantic (1280) + Grammar (64)
+                        const combinedInput = new Float32Array(1280 + grammar.numClusters);
+                        combinedInput.set(embedding, 0);
+                        combinedInput.set(grammarContext, 1280);
+
+                        // Get Phase 3's prediction distribution (60%)
+                        const phase3Output = phase3Predictor.forward(combinedInput);
+                        const phase3Probs = phase3Output.probs;
+
+                        // 🧬 MIRROR MIX: Create soft target by mixing distributions
+                        // 60% Phase 3 probability distribution + 40% hard GPT target
+                        const mixedTarget = new Float32Array(newVocabSize);
+                        for (let k = 0; k < newVocabSize; k++) {
+                            mixedTarget[k] = phase3Probs[k] * phase3Weight; // 60% from Phase 3
+                        }
+                        mixedTarget[gptTargetTokenId] += gptWeight; // 40% hard target from GPT
+
+                        // Normalize to valid probability distribution
+                        let sum = 0;
+                        for (let k = 0; k < newVocabSize; k++) sum += mixedTarget[k];
+                        for (let k = 0; k < newVocabSize; k++) mixedTarget[k] /= sum;
+
+                        trainingPairs.push({
+                            embedding: combinedInput,
+                            targetTokenId: gptTargetTokenId, // For validation accuracy
+                            softTarget: mixedTarget          // For training
+                        });
+                    }
+                }
+            }
+
+            // VALIDATION PAIRS: Use hard targets for accurate validation
+            const validationPairs = [];
+            for (let i = 0; i < valSonnets.length; i++) {
+                if (i % 10 === 0) console.log(`      Processing val sonnet ${i}/${valSonnets.length}`);
+
+                const sonnet = valSonnets[i];
+                const words = sonnet.split(/\s+/).filter(w => w.length > 0).map(w => w.toLowerCase());
+                const tokenIds = words.map(w => wordToId.get(w)).filter(id => id !== undefined);
+
+                if (tokenIds.length < 2) continue;
+
+                for (let j = 0; j < tokenIds.length - 1; j++) {
+                    const currentWord = words[j];
+                    const embedding = wordToSemanticEmbedding.get(currentWord);
+
+                    if (embedding) {
+                        const targetTokenId = tokenIds[j + 1];
+                        const currentCluster = grammar.getClusterForWord(currentWord);
+                        const grammarContext = grammar.getNextClusterProbs(currentCluster);
+
+                        const combinedInput = new Float32Array(1280 + grammar.numClusters);
+                        combinedInput.set(embedding, 0);
+                        combinedInput.set(grammarContext, 1280);
+
+                        validationPairs.push({ embedding: combinedInput, targetTokenId });
+                    }
+                }
+            }
+
+            console.log(`   📊 Pairs: ${trainingPairs.length} train | ${validationPairs.length} val`);
+            totalPairsProcessed += trainingPairs.length + validationPairs.length;
+
+            // 🧬 Train with soft targets (knowledge distillation)
+            await this.trainBossFightSoftTargets(textgenPredictor, trainingPairs, validationPairs, {
+                epochs: batchEpochs,
+                learningRate,
+                interruptMs,
+                interruptBatch: 0.314159,
+                patience
+            });
+
+            console.log(`      ✅ Batch ${batchIdx + 1} complete\n`);
+        }
+
+        console.log(`\n🎯 Text Generation training complete: ${sonnets.length} sonnets, ${totalPairsProcessed} total pairs`);
+        console.log(`   🔮 Model trained with ${phase3Weight * 100}% Phase 3 + ${gptWeight * 100}% GPT mix`);
+
+        const outputPath = `${this.outputPrefix}-textgen.json`;
+        await textgenPredictor.save(outputPath);
+        console.log(`✅ Phase 3.5 complete: ${outputPath}\n`);
+        return outputPath;
+    }
+
+    // Knowledge distillation training with soft targets
+    async trainBossFightSoftTargets(predictor, trainData, valData, options = {}) {
+        const {
+            epochs = 3,
+            learningRate = 0.0003,
+            interruptMs = 214.285,
+            interruptBatch = 6.28318,
+            patience = 2
+        } = options;
+
+        let currentLearningRate = learningRate;
+        let bestValLoss = Infinity;
+        let bestEpoch = -1;
+        let checkpoint = null;
+        let epochsCompleted = 0;
+        let retryCount = 0;
+
+        console.log(`\n   🎓 Soft-target training: ${trainData.length} train | ${valData.length} val`);
+        console.log(`      Epochs: ${epochs}, LR: ${learningRate}, Patience: ${patience}\n`);
+
+        while (epochsCompleted < epochs) {
+            const epoch = epochsCompleted;
+
+            // Train with soft targets (KL divergence style)
+            let trainLoss = 0;
+            for (const pair of trainData) {
+                const { probs } = predictor.forward(pair.embedding, true);
+
+                // Cross-entropy with soft targets
+                let loss = 0;
+                for (let i = 0; i < pair.softTarget.length; i++) {
+                    if (pair.softTarget[i] > 0) {
+                        loss -= pair.softTarget[i] * Math.log(probs[i] + 1e-10);
+                    }
+                }
+                trainLoss += loss;
+
+                // Backward with soft targets
+                this.backwardSoftTarget(predictor, probs, pair.softTarget, pair.embedding, currentLearningRate);
+            }
+            trainLoss /= trainData.length;
+
+            // Validate with hard targets
+            const { loss: valLoss, accuracy: valAcc } = await predictor._validate(valData);
+
+            const remaining = epochs - epochsCompleted - 1;
+
+            if (valLoss < bestValLoss) {
+                bestValLoss = valLoss;
+                bestEpoch = epoch;
+                retryCount = 0;
+
+                checkpoint = {
+                    W1: new Float32Array(predictor.W1),
+                    b1: new Float32Array(predictor.b1),
+                    W2: new Float32Array(predictor.W2),
+                    b2: new Float32Array(predictor.b2),
+                    epoch: epoch,
+                    valLoss: valLoss
+                };
+
+                console.log(`      💾 Epoch ${epoch}/${epochs}: Train=${trainLoss.toFixed(4)}, Val=${valLoss.toFixed(4)} ⭐ NEW BEST, Acc=${valAcc.toFixed(1)}%, Remaining=${remaining}`);
+                epochsCompleted++;
+
+            } else {
+                retryCount++;
+                console.log(`      🔄 Epoch ${epoch}/${epochs}: Train=${trainLoss.toFixed(4)}, Val=${valLoss.toFixed(4)} ❌ WORSE (Retry #${retryCount}), Acc=${valAcc.toFixed(1)}%`);
+
+                if (checkpoint) {
+                    predictor.W1 = new Float32Array(checkpoint.W1);
+                    predictor.b1 = new Float32Array(checkpoint.b1);
+                    predictor.W2 = new Float32Array(checkpoint.W2);
+                    predictor.b2 = new Float32Array(checkpoint.b2);
+
+                    if (retryCount >= patience && retryCount % patience === 0) {
+                        currentLearningRate = Math.max(currentLearningRate * 0.5, 1e-7);
+                        console.log(`      ⚡ WINCON! Retry #${retryCount} → LR ↓ ${currentLearningRate.toFixed(7)}`);
+                    }
+
+                    console.log(`      ⚔️  RESPAWN from epoch ${checkpoint.epoch} (best val: ${checkpoint.valLoss.toFixed(4)})\n`);
+                } else {
+                    epochsCompleted++;
+                }
+            }
+        }
+
+        if (checkpoint) {
+            predictor.W1 = checkpoint.W1;
+            predictor.b1 = checkpoint.b1;
+            predictor.W2 = checkpoint.W2;
+            predictor.b2 = checkpoint.b2;
+            console.log(`      🏆 Best checkpoint: epoch ${bestEpoch}, val loss ${bestValLoss.toFixed(4)}`);
+        }
+    }
+
+    // Backward pass for soft targets (knowledge distillation)
+    backwardSoftTarget(predictor, probs, softTarget, embedding, learningRate) {
+        // Gradient: probs - softTarget (cross-entropy with soft labels)
+        const gradLogits = new Float32Array(predictor.vocabSize);
+        for (let i = 0; i < predictor.vocabSize; i++) {
+            gradLogits[i] = probs[i] - softTarget[i];
+        }
+
+        // Recompute hidden for gradient
+        const hidden = new Float32Array(predictor.hiddenSize);
+        for (let i = 0; i < predictor.hiddenSize; i++) {
+            let sum = predictor.b1[i];
+            for (let j = 0; j < predictor.embeddingSize; j++) {
+                sum += embedding[j] * predictor.W1[j * predictor.hiddenSize + i];
+            }
+            hidden[i] = Math.max(0, sum);
+        }
+
+        // Backprop through Layer 2
+        const gradHidden = new Float32Array(predictor.hiddenSize);
+        for (let i = 0; i < predictor.vocabSize; i++) {
+            predictor.b2[i] -= learningRate * gradLogits[i];
+            for (let j = 0; j < predictor.hiddenSize; j++) {
+                predictor.W2[j * predictor.vocabSize + i] -= learningRate * gradLogits[i] * hidden[j];
+                gradHidden[j] += gradLogits[i] * predictor.W2[j * predictor.vocabSize + i];
+            }
+        }
+
+        // Backprop through Layer 1 (with ReLU derivative)
+        for (let i = 0; i < predictor.hiddenSize; i++) {
+            if (hidden[i] > 0) {
+                predictor.b1[i] -= learningRate * gradHidden[i];
+                for (let j = 0; j < predictor.embeddingSize; j++) {
+                    predictor.W1[j * predictor.hiddenSize + i] -= learningRate * gradHidden[i] * embedding[j];
+                }
+            }
+        }
+    }
+
+    // Boss-fight training method
     async trainBossFight(predictor, trainData, valData, options = {}) {
         const {
             epochs = 3,
             learningRate = 0.00025,
-            interruptMs = 428.57,
-            interruptBatch = 0.314159,
+            interruptMs = 214.285,
+            interruptBatch = 6.28318,
             patience = 2
         } = options;
 
@@ -963,19 +1267,16 @@ class ContinualTrainingPipeline {
         while (epochsCompleted < epochs) {
             const epoch = epochsCompleted;
 
-            // Train one epoch
             const trainLoss = await predictor._runEpoch(trainData, currentLearningRate, 1, interruptMs, interruptBatch, true);
             const { loss: valLoss, accuracy: valAcc } = await predictor._validate(valData);
 
             const remaining = epochs - epochsCompleted - 1;
 
-            // Check if this is a new best
             if (valLoss < bestValLoss) {
                 bestValLoss = valLoss;
                 bestEpoch = epoch;
                 retryCount = 0;
 
-                // Save checkpoint
                 checkpoint = {
                     W1: new Float32Array(predictor.W1),
                     b1: new Float32Array(predictor.b1),
@@ -990,33 +1291,27 @@ class ContinualTrainingPipeline {
                 epochsCompleted++;
 
             } else {
-                // BOSS NOT DEFEATED!
                 retryCount++;
                 console.log(`      🔄 Epoch ${epoch}/${epochs}: Train=${trainLoss.toFixed(4)}, Val=${valLoss.toFixed(4)} ❌ WORSE (Retry #${retryCount}), Acc=${valAcc.toFixed(1)}%`);
 
                 if (checkpoint) {
-                    // Restore checkpoint weights
                     predictor.W1 = new Float32Array(checkpoint.W1);
                     predictor.b1 = new Float32Array(checkpoint.b1);
                     predictor.W2 = new Float32Array(checkpoint.W2);
                     predictor.b2 = new Float32Array(checkpoint.b2);
 
-                    // WINCON: After patience failures, drop LR
                     if (retryCount >= patience && retryCount % patience === 0) {
                         currentLearningRate = Math.max(currentLearningRate * 0.5, 1e-7);
                         console.log(`      ⚡ WINCON! Retry #${retryCount} → LR ↓ ${currentLearningRate.toFixed(7)}`);
                     }
 
                     console.log(`      ⚔️  RESPAWN from epoch ${checkpoint.epoch} (best val: ${checkpoint.valLoss.toFixed(4)})\n`);
-                    // Don't increment epochsCompleted
                 } else {
-                    // No checkpoint, just continue
                     epochsCompleted++;
                 }
             }
         }
 
-        // Restore best checkpoint
         if (checkpoint) {
             predictor.W1 = checkpoint.W1;
             predictor.b1 = checkpoint.b1;
@@ -1026,1105 +1321,283 @@ class ContinualTrainingPipeline {
         }
     }
 
-    async mergePhase4_enhanced(aetherPath, decoderPath, predictorPath) {
-        console.log('╔════════════════════════════════════════════════════════════════╗');
-        console.log('║  PHASE 4: FINAL MERGE (Evolution Complete)                  ║');
-        console.log('╚════════════════════════════════════════════════════════════════╝\n');
-
-        const unified = {
-            version: "9.2-pipe-exact",
-            type: "unified_aether_mind_evolved",
-            architecture: { embeddingSize: 768, aetherHiddenSize: 304, tokenHiddenSize: 304, vocabSize: 50257, decoderHidden: 304, maxCharLength: 15 },
-            weights: {},
-            vocab: {},
-            charVocab: "",
-            metadata: { mergeDate: new Date().toISOString(), corpus: this.corpusPath, methods: "Pipe-Exact Continual Evolution" }
-        };
-
-        const aether = JSON.parse(await fs.readFile(aetherPath, 'utf8'));
-        unified.weights.W_aether_enc = Array.from(aether.weights.W1);
-        unified.weights.b_aether_enc = Array.from(aether.weights.b1);
-        unified.weights.W_aether_dec = Array.from(aether.weights.W2);
-        unified.weights.b_aether_dec = Array.from(aether.weights.b2);
-
-        const decoder = JSON.parse(await fs.readFile(decoderPath, 'utf8'));
-        unified.charVocab = decoder.charVocab;
-        unified.vocab = decoder.vocab;
-
-        // Don't save heavy decoder weights in unified JSON to keep it small
-        // They stay in decoder.json for continual learning
-
-        const predictor = JSON.parse(await fs.readFile(predictorPath, 'utf8'));
-        unified.weights.W_token_1 = Array.from(predictor.weights.W1);
-        unified.weights.b_token_1 = Array.from(predictor.weights.b1);
-        unified.weights.W_token_2 = Array.from(predictor.weights.W2);
-        unified.weights.b_token_2 = Array.from(predictor.weights.b2);
-
-        // 🎯 INCLUDE EVOLVED SEMANTICS FOR PREDICTION FALLBACKS
-        if (decoder.evolvedSemantics) {
-            unified.evolvedSemantics = decoder.evolvedSemantics;
-            console.log(`   ✓ Included evolved semantics: ${Object.keys(unified.evolvedSemantics).length} embedding fallbacks\n`);
-        } else {
-            unified.evolvedSemantics = {};
-            console.log('   ⚠️ No evolved semantics - generation may fallback to synthetic embeddings\n');
-        }
-
-        // Update vocab size to match evolved decoder
-        const newVocabSize = Object.keys(decoder.vocab).length;
-        unified.architecture.vocabSize = newVocabSize;
-        console.log(`   ✓ Updated vocab size: ${newVocabSize} words`);
-
-        const jsonPath = `${this.outputPrefix}.json`;
-        const jsonStr = JSON.stringify(unified);
-        console.log(`JSON size: ${(jsonStr.length / 1024 / 1024).toFixed(1)} MB`);
-        await fs.writeFile(jsonPath, jsonStr);
-
-        const binPath = `${this.outputPrefix}.bin`;
-        const embeddings = new Float32Array(decoder.weights.tokenEmbeddings);
-        await fs.writeFile(binPath, Buffer.from(embeddings.buffer));
-
-        console.log(`Evolved model: ${jsonPath}`);
-        console.log(`Embeddings: ${binPath} (${(embeddings.byteLength / 1024 / 1024).toFixed(2)} MB)\n`);
-        console.log(`Test: node unified-chat.js ${jsonPath}\n`);
-        return { jsonPath, binPath };
-    }
-
-    /**
-     * HYBRID CONTINUAL TRAINING
-     * 1. Builds iterative weights using semantic backprop (original approach)
-     * 2-3. Then applies our improved Phase 2 + Phase 3 (converged_pipe_2 approach)
-     */
-    async runContinualTraining(options = {}) {
-        console.log('\n🏗️ HYBRID CONTINUAL TRAINING PIPELINE');
-        console.log('====================================\n');
-
-        // STEP 1: Semantic building using iterative backprop (from original continual-training)
-        console.log('📈 STEP 1: Semantic foundation building (iterative backprop)...');
-        await this.buildIterativeWeights(options);
-        console.log('   ✅ Semantic foundation complete\n');
-
-        // STEP 2: Improved Phase 2 (from converged_pipe_2.js)
-        console.log('🔤 STEP 2: Semantic Hangman Decoder (improved architecture)...');
-        const decoderPath = await this.trainImprovedSemanticDecoder(options);
-        console.log('   ✅ Semantic decoder complete\n');
-
-        // STEP 3: Improved Phase 3 (from converged_pipe_2.js)
-        console.log('🎯 STEP 3: Advanced Token Predictor (improved architecture)...');
-        const predictorPath = await this.trainPhase3_TokenPredictor(decoderPath, options);
-        console.log('   ✅ Token predictor complete\n');
-
-        // STEP 4: Train tokenizer on new expanded vocabulary
-        console.log('🎭 STEP 4: Train tokenizer on expanded vocabulary (word compounding)...');
-        const finalPredictorPath = await this.trainTokenizerEvolution(decoderPath, predictorPath);
-        console.log('   ✅ Tokenizer evolution complete\n');
-
-        // STEP 5: Final merge with complete embedding preservation
-        console.log('🔗 STEP 5: Final merge with zero semantic gaps...');
-        await this.mergeZeroGapEvolution(decoderPath, finalPredictorPath);
-        console.log('   ✅ Evolution complete\n');
-
-        console.log('\n🎯 HYBRID EVOLUTION COMPLETE:');
-        console.log(`   Foundation: aether-core semantic weights`);
-        console.log(`   Evolution: ${this.corpusPath}`);
-        console.log(`   Result: ${this.outputPrefix}.json`);
-        console.log(`   Test: node unified-chat-fixed.js ${this.outputPrefix}.json\n`);
-    }
-
-    /**
-     * STEP 1: EXACT Phase 1 from original continual-training.js using B3TrainingPipeline
-     * This uses your custom CPU backprop B3TrainingPipeline - no need to reinvent it!
-     */
-    async buildIterativeWeights(options = {}) {
-        console.log('🏗️ Using EXACT original Phase 1: B3TrainingPipeline.runFullPipeline()...');
-
-        // Create output path for Phase 1 results
-        const phase1Output = `${this.outputPrefix}-phase1-aether-core.json`;
-
-        // Initialize B3TrainingPipeline (your custom CPU backprop system!)
-        const pipeline = new B3TrainingPipeline();
-        pipeline.teacherPipeline = { tokenizer: this.tokenizer };
-        pipeline.extractor = this.gptTutor; // B3EmbeddingExtractor uses GPT
-
-        console.log('   📊 Running B3TrainingPipeline sentence-level semantic training...');
-
-        // Run EXACT same pipeline as original continual-training.js
-        await pipeline.runFullPipeline(this.corpusPath, phase1Output, {
-            epochs: DEFAULT_CONFIG.aetherEpochs,
-            learningRate: DEFAULT_CONFIG.aetherLR,
-            batchSize: DEFAULT_CONFIG.aetherBatchSize,
-            hiddenSize: DEFAULT_CONFIG.hiddenSize,
-            useCachedEmbeddings: false,
-            cacheFile: `${this.outputPrefix}-cache-aether.json`
-        });
-
-        console.log(`   ✅ Phase 1 complete: ${phase1Output}`);
-        console.log('   📚 B3TrainingPipeline created proper sentence-level semantic embeddings');
-
-        // Load the Phase 1 results for use in subsequent phases
-        this.phase1Embeddings = JSON.parse(await fs.readFile(phase1Output, 'utf8'));
-        this.foundationalEmbeddings = {}; // Initialize for Phase 2 use
-    }
-
-    /**
-     * STEP 2: Improved Semantic Hangman Decoder
-     * Uses original continual-training.js method to find new vs existing words
-     * Trains new words using converged_pipe_2.js architecture
-     * New vocab = New words + old vocab
-     */
-    async trainImprovedSemanticDecoder(options = {}) {
-        console.log('🔤 Hybrid Semantic Decoder: New words + old vocab approach');
-
-        // Extract corpus words
-        const content = await fs.readFile(this.corpusPath, 'utf8');
-        const rawWords = content.match(/[a-zA-Z]+/g) || [];
-        const corpusWords = rawWords.filter(w => w.length >= 2 && w.length <= 15).map(w => w.toLowerCase());
-        const uniqueCorpusWords = [...new Set(corpusWords)];
-
-        // === ORIGINAL SCRIPT METHOD: Compare new words vs existing ===
-        console.log('   📚 Using Original/continual-training.js method for new vs existing words...');
-
-        // Get existing vocabulary from teacher model
-        const oldVocabWords = new Set(Object.values(this.teacherModel.vocab || {}));
-        console.log(`   📖 Old vocab: ${oldVocabWords.size} words`);
-
-        // Find new words (words in corpus that aren't in old vocab)
-        const newWords = uniqueCorpusWords.filter(word => !oldVocabWords.has(word));
-        console.log(`   🆕 New words discovered: ${newWords.length} (${uniqueCorpusWords.length - newWords.length} existing)`);
-
-        // Build combined vocabulary: New words + old vocab
-        this.evolvedVocab = {
-            ...this.teacherModel.vocab,  // Old vocab preserved
-        };
-
-        let nextTokenId = Math.max(...Object.keys(this.evolvedVocab).map(k => parseInt(k))) + 1;
-
-        // Add new words to vocabulary
-        for (const word of newWords) {
-            this.evolvedVocab[nextTokenId.toString()] = word;
-            nextTokenId++;
-        }
-
-        console.log(`   🧬 Evolved vocab: ${Object.keys(this.evolvedVocab).length} words (${Object.keys(this.teacherModel.vocab).length} old + ${newWords.length} new)`);
-
-        // === CONVERGED_PIPE_2.JS METHOD: Train new words with improved architecture ===
-        console.log('   🎯 Training new words using converged_pipe_2.js architecture...');
-
-        // Load Phase 1 semantic embeddings for use in training
-        const phase1Embeddings = await this.loadPhase1EmbeddingsForTraining();
-
-        const trainingData = [];
-
-        for (const word of newWords.slice(0, Math.min(5000, newWords.length))) {
-            try {
-                const tokenIds = await this.tokenizer.encode(word);
-                const tokenId = tokenIds[0];
-
-                // Only train new words (skip existing ones from teacher)
-                if (!this.teacherModel.vocab || !Object.values(this.teacherModel.vocab).includes(word)) {
-                    // Use Phase 1 embeddings to enrich new words
-                    const semanticEmbedding = await this.extractWordLevelEmbedding(word, phase1Embeddings);
-
-                    if (semanticEmbedding) {
-                        trainingData.push({
-                            tokenId: parseInt(Object.keys(this.evolvedVocab).find(k => this.evolvedVocab[k] === word)),
-                            word,
-                            length: word.length,
-                            semanticEmbedding: new Float32Array(semanticEmbedding)
-                        });
-                    }
-                }
-            } catch (e) {}
-        }
-
-        console.log(`   🎯 Training ${trainingData.length} new words with semantic foundation`);
-
-        // Use converged_pipe_2.js SemanticHangmanDecoder with proper vocab size
-        const vocabSize = Object.keys(this.evolvedVocab).length;
-        const decoder = new SemanticHangmanDecoder(vocabSize, DEFAULT_CONFIG.hiddenSize, 15, 768);
-
-        // Warm load from old tokenizer/patterns AFTER decoder is fully constructed
-        if (this.teacherModel.vocab) {
-            console.log(`   ♻️ Warm loading from old tokenizer (${Object.keys(this.teacherModel.vocab).length} word patterns)`);
-
-            // Load existing token patterns and semantics safely
-            for (const [tokenId, word] of Object.entries(this.teacherModel.vocab)) {
-                const tokenInt = parseInt(tokenId);
-                // Check bounds safely now that decoder is constructed
-                if (tokenInt < decoder.vocabSize && decoder.tokenEmbeddings) {
-                    const embeddingBase = tokenInt * 128;
-                    if (embeddingBase >= 0 && embeddingBase + 128 <= decoder.tokenEmbeddings.length) {
-                        // Maintain previous learned patterns
-                        if (this.teacherModel.semanticEmbeddings && this.teacherModel.semanticEmbeddings[tokenId]) {
-                            decoder.setSemanticEmbedding(tokenInt, new Float32Array(this.teacherModel.semanticEmbeddings[tokenId]));
-                        }
-                    }
-                }
-            }
-        }
-
-        // Train new words with improved architecture
-        await decoder.train(trainingData, {
-            epochs: options.decoderEpochs || DEFAULT_CONFIG.decoderEpochs,
-            learningRate: options.decoderLR || DEFAULT_CONFIG.decoderLR,
-            hangmanRounds: DEFAULT_CONFIG.decoderHangmanRounds
-        });
-
-        // Store evolved vocabulary for Phase 3
-        decoder.evolvedVocab = this.evolvedVocab;
-
-        const decoderPath = `${this.outputPrefix}-decoder.json`;
-        await decoder.save(decoderPath);
-
-        console.log(`   ✅ New word training complete: ${trainingData.length} words added to vocab`);
-
-        // FIX: Generate vocab mappings RIGHT HERE after words are resolved
-        // (Not in merge phase where it might be empty)
-        await this.generateVocabMappingsPostTraining();
-
-        return decoderPath;
-    }
-
-    async trainPhase3_TokenPredictor(decoderPath, options = {}) {
+    async mergePhase4(aetherPath, decoderPath, predictorPath, textgenPath, grammarPath) {
         console.log('╔═══════════════════════════════════════════════════════════════╗');
-        console.log('║  PHASE 3: TOKEN PREDICTOR (Tokenizer is for prediction!)     ║');
+        console.log('║  PHASE 4: FINAL MERGE (Unified Semantic Flow Model!)         ║');
         console.log('╚═══════════════════════════════════════════════════════════════╝\n');
 
-        const {
-            learningRate = 0.00025,
-            hiddenSize = 304,
-            batchSizeSonnets = 5,
-            batchEpochs = 3,
-            validationSplit = 0.175
-        } = options;
-
-        // Load decoder (which has evolved vocabulary from Phases 1-2)
-        const decoderData = JSON.parse(await fs.readFile(decoderPath, 'utf8'));
-
-        // 16-bit BPE vocab remapping (preserves semantics from Phases 1-2!)
-        const learnedEntries = Array.from(Object.entries(decoderData.vocab));
-        const wordToId = new Map();
-
-        // Map words to sequential custom token IDs (0-N)
-        learnedEntries.forEach(([word, gptId], i) => {
-            wordToId.set(word, i);
-        });
-
-        const newVocabSize = wordToId.size;
-        console.log(`📖 Extended vocab remapped: ${newVocabSize} words (0-${newVocabSize-1})`);
-        console.log(`   Semantically preserved from Phases 1-2 foundation! <3\n`);
-
-        // Extract sonnets from corpus
-        console.log('📜 Extracting sonnets from corpus...');
-        const content = await fs.readFile(this.corpusPath, 'utf8');
-        const lines = content.split('\n').map(l => l.trim()).filter(l => l.length > 10);
-        const sonnets = [];
-        for (let i = 0; i < lines.length; i += 14) {
-            const sonnetLines = lines.slice(i, Math.min(i + 14, lines.length));
-            if (sonnetLines.length >= 10) {
-                sonnets.push(sonnetLines.join(' '));
+        const unified = {
+            version: "9.0-textgen-flow",
+            type: "unified_aether_mind",
+            architecture: {
+                embeddingSize: 1280,
+                aetherHiddenSize: 512,
+                tokenHiddenSize: 512,
+                textgenHiddenSize: 512,
+                vocabSize: 50257,
+                decoderHidden: 512,
+                maxCharLength: 15,
+                contextWindow: 5
+            },
+            charVocab: "",
+            metadata: {
+                mergeDate: new Date().toISOString(),
+                corpus: this.corpusPath,
+                methods: "Semantic-Flow: Phase1→Phase2→Phase3→Phase3.5(TextGen)",
+                weightsInBinary: false,
+                vocabType: "16-bit BPE remapped <3"
             }
-        }
-        console.log(`📚 Loaded ${sonnets.length} sonnets from corpus\n`);
+        };
 
-        // Create predictor with extended vocabulary size
-        const predictor = new TinyTokenPredictor(newVocabSize, 768, hiddenSize);
-
-        let totalPairsProcessed = 0;
-        const numBatches = Math.ceil(sonnets.length / batchSizeSonnets);
-
-        for (let batchIdx = 0; batchIdx < numBatches; batchIdx++) {
-            const batchStart = batchIdx * batchSizeSonnets;
-            const batchSonnets = sonnets.slice(batchStart, batchStart + batchSizeSonnets);
-
-            console.log(`\n📦 Batch ${batchIdx + 1}/${numBatches}: ${batchSonnets.length} sonnets`);
-
-            const numVal = Math.max(1, Math.floor(batchSonnets.length * validationSplit));
-            const numTrain = batchSonnets.length - numVal;
-
-            // TRAINING PAIRS: Use word-to-ID mapping built from extended vocab
-            const trainingPairs = [];
-            for (let i = 0; i < numTrain; i++) {
-                if (i % 10 === 0) console.log(`      Processing train sonnet ${i}/${numTrain}`);
-
-                const sonnet = batchSonnets[i];
-                const words = sonnet.split(/\s+/).filter(w => w.length > 0).map(w => w.toLowerCase());
-                const tokenIds = words.map(w => wordToId.get(w)).filter(id => id !== undefined);
-
-                if (tokenIds.length < 2) continue;
-
-                for (let j = 0; j < tokenIds.length - 1; j++) {
-                    const currentWord = words[j];
-                    // Use semantic embeddings preserved from Phases 1-2
-                    const embedding = this.foundationalEmbeddings[currentWord] ||
-                        (decoderData.evolvedSemantics && decoderData.evolvedSemantics[currentWord] ?
-                            new Float32Array(decoderData.evolvedSemantics[currentWord]) :
-                            new Float32Array(768).fill(0.01)); // Fallback
-
-                    const targetTokenId = tokenIds[j + 1];
-                    trainingPairs.push({ embedding, targetTokenId });
-                }
-            }
-
-            // VALIDATION PAIRS: Same semantic approach
-            const validationPairs = [];
-            for (let i = 0; i < numVal; i++) {
-                if (i % 10 === 0) console.log(`      Processing val sonnet ${i}/${numVal}`);
-
-                const sonnet = batchSonnets[numTrain + i];
-                const words = sonnet.split(/\s+/).filter(w => w.length > 0).map(w => w.toLowerCase());
-                const tokenIds = words.map(w => wordToId.get(w)).filter(id => id !== undefined);
-
-                if (tokenIds.length < 2) continue;
-
-                for (let j = 0; j < tokenIds.length - 1; j++) {
-                    const currentWord = words[j];
-                    const embedding = this.foundationalEmbeddings[currentWord] ||
-                        (decoderData.evolvedSemantics && decoderData.evolvedSemantics[currentWord] ?
-                            new Float32Array(decoderData.evolvedSemantics[currentWord]) :
-                            new Float32Array(768).fill(0.01));
-
-                    const targetTokenId = tokenIds[j + 1];
-                    validationPairs.push({ embedding, targetTokenId });
-                }
-            }
-
-            console.log(`   📊 Pairs: ${trainingPairs.length} train | ${validationPairs.length} val`);
-            totalPairsProcessed += trainingPairs.length + validationPairs.length;
-
-            // Train batch with checkpoint-rewind
-            await this.trainBossFight(predictor, trainingPairs, validationPairs, {
-                epochs: batchEpochs,
-                learningRate,
-                interruptMs: 428.57,
-                interruptBatch: DEFAULT_CONFIG.predictorPhiComplexity,
-                patience: 2
-            });
-
-            console.log(`      ✅ Batch ${batchIdx + 1} complete\n`);
-        }
-
-        console.log(`\n🎯 Training complete: ${sonnets.length} sonnets, ${totalPairsProcessed} total pairs`);
-        console.log(`   Semantically preserved through all phases! <3 Lets predict some words >:D\n`);
-
-        const outputPath = `${this.outputPrefix}-predictor.json`;
-        await predictor.save(outputPath);
-        console.log(`✅ Phase 3 complete: ${outputPath}\n`);
-        return outputPath;
-    }
-
-    /**
-     * STEP 4: Train tokenizer on expanded vocabulary (word compounding over time)
-     */
-    async trainTokenizerEvolution(decoderPath, predictorPath) {
-        console.log('🎭 Training tokenizer on expanded vocabulary for generative understanding...');
-
-        // Load evolved vocabulary from Phase 2
-        const decoderData = JSON.parse(await fs.readFile(decoderPath, 'utf8'));
-        const evolvedVocab = decoderData.evolvedVocab || {};
-
-        console.log(`   📖 Training with evolved vocabulary: ${Object.keys(evolvedVocab).length} words`);
-
-        // Initialize final predictor with complete evolved vocabulary
-        const finalPredictor = new TinyTokenPredictor(
-            Object.keys(evolvedVocab).length,
-            768,
-            DEFAULT_CONFIG.hiddenSize
-        );
-
-        // Warm start from Phase 3 predictor
-        if (predictorPath) {
-            const predictorData = JSON.parse(await fs.readFile(predictorPath, 'utf8'));
-            finalPredictor.W1 = new Float32Array(predictorData.weights.W1);
-            finalPredictor.b1 = new Float32Array(predictorData.weights.b1);
-            finalPredictor.W2 = new Float32Array(predictorData.weights.W2);
-            finalPredictor.b2 = new Float32Array(predictorData.weights.b2);
-            finalPredictor.isInitialized = true;
-            console.log(`   ♻️ Warm started from Phase 3 predictor`);
-        }
-
-        // === WORD COMPOUNDING TRAINING ===
-        // Train on expanded vocabulary to learn generative patterns over time
-        console.log('   🧠 Learning word compounding patterns...');
-
-        const content = await fs.readFile(this.corpusPath, 'utf8');
-        const sentences = content.split(/[.!?\n]+/).map(s => s.trim()).filter(s => s.length > 10);
-        const compoundingPairs = [];
-
-        // Create compounding training pairs where model learns to predict words
-        // in the context of the expanded vocabulary
-        for (const sentence of sentences.slice(0, Math.min(200, sentences.length))) {
-            const words = sentence.split(/\s+/).filter(w => w.length > 2).map(w => w.toLowerCase());
-
-            for (let i = 0; i < words.length - 1; i++) {
-                const contextWord = words[i];
-                const nextWord = words[i + 1];
-
-                // Use evolved vocabulary IDs
-                const contextId = Object.keys(evolvedVocab).find(key => evolvedVocab[key] === contextWord);
-                const nextId = Object.keys(evolvedVocab).find(key => evolvedVocab[key] === nextWord);
-
-                if (contextId && nextId && this.foundationalEmbeddings[contextWord]) {
-                    // Train with foundation embeddings for consistency
-                    compoundingPairs.push({
-                        embedding: new Float32Array(this.foundationalEmbeddings[contextWord]),
-                        targetTokenId: parseInt(nextId)
-                    });
-                }
-            }
-        }
-
-        console.log(`   📊 Generated ${compoundingPairs.length} word compounding pairs`);
-
-        // Train the tokenizer to understand compounding patterns
-        if (compoundingPairs.length > 0) {
-            await finalPredictor.trainFromTeacher(compoundingPairs, {
-                epochs: 3,  // Additional epochs for compounding learning
-                learningRate: DEFAULT_CONFIG.predictorLR / 2  // More conservative learning
-            });
-
-            console.log('   ✅ Word compounding patterns learned');
-            console.log(`      Model now understands ~${Object.keys(evolvedVocab).length} word relationships`);
-        }
-
-        // === EVOLVED TOKENIZER SAVE ===
-        const evolvedPredictorPath = `${this.outputPrefix}-evolved-predictor.json`;
-        await finalPredictor.save(evolvedPredictorPath);
-
-        console.log(`   💾 Saved evolved tokenizer predictor: ${evolvedPredictorPath}`);
-
-        return evolvedPredictorPath;
-    }
-
-    /**
-     * STEP 4: Zero-gap evolution merge with complete embedding preservation
-     */
-    async mergeZeroGapEvolution(decoderPath, predictorPath) {
-        console.log('🔗 Merging with complete embedding preservation (zero semantic gaps)...');
-
-        const decoder = JSON.parse(await fs.readFile(decoderPath, 'utf8'));
+        console.log('📂 Loading components...');
+        const aether = JSON.parse(await fs.readFile(aetherPath, 'utf8'));
         const predictor = JSON.parse(await fs.readFile(predictorPath, 'utf8'));
+        const textgen = JSON.parse(await fs.readFile(textgenPath, 'utf8'));
+        const decoder = JSON.parse(await fs.readFile(decoderPath, 'utf8'));
+        const grammar = JSON.parse(await fs.readFile(grammarPath, 'utf8'));
 
-        // Create evolved model preserving ALL foundation capabilities
-        const evolvedModel = {
-            ...this.teacherModel, // Preserve ALL original structure
-
-            // Evolution metadata
-            version: `${this.teacherModel.version}-hybrid-evolved`,
-            metadata: {
-                ...this.teacherModel.metadata,
-                evolutionMethod: 'hybrid-aether-core-foundation',
-                evolutionCorpus: this.corpusPath,
-                evolutionDate: new Date().toISOString(),
-                foundationEmbeddingsCount: Object.keys(this.foundationalEmbeddings).length,
-                totalEmbeddings: Object.keys(this.teacherModel.semanticEmbeddings || {}).length +
-                               Object.keys(this.foundationalEmbeddings).length
-            },
-
-            // Preserve all original weights and add evolved predictor
-            weights: {
-                ...this.teacherModel.weights,
-                W_token_1: Array.from(predictor.weights.W1),
-                b_token_1: Array.from(predictor.weights.b1),
-                W_token_2: Array.from(predictor.weights.W2),
-                b_token_2: Array.from(predictor.weights.b2)
-            },
-
-            // Merge vocabularies with conflict resolution
-            vocab: { ...this.teacherModel.vocab, ...decoder.vocab },
-            ownVocab: { ...this.teacherModel.ownVocab, ...decoder.vocab },
-
-            // Preserve and extend semantic embeddings
-            semanticEmbeddings: {
-                ...this.teacherModel.semanticEmbeddings, // Original embeddings
-                ...this.foundationalEmbeddings              // Hybrid evolved embeddings
-            }
+        // Embed weights directly in JSON
+        unified.weights = {
+            W_aether_enc: Array.from(aether.weights.W1),
+            b_aether_enc: Array.from(aether.weights.b1),
+            W_aether_dec: Array.from(aether.weights.W2),
+            b_aether_dec: Array.from(aether.weights.b2),
+            // Phase 3: Token Classification Predictor
+            W_token_1: Array.from(predictor.weights.W1),
+            b_token_1: Array.from(predictor.weights.b1),
+            W_token_2: Array.from(predictor.weights.W2),
+            b_token_2: Array.from(predictor.weights.b2),
+            // Phase 3.5: Text Generation Predictor
+            W_textgen_1: Array.from(textgen.weights.W1),
+            b_textgen_1: Array.from(textgen.weights.b1),
+            W_textgen_2: Array.from(textgen.weights.W2),
+            b_textgen_2: Array.from(textgen.weights.b2),
+            // Save grammar artifacts for runtime use
+            grammar_centroids: grammar.centroids,
+            grammar_transitions: grammar.transitions,
+            grammar_word_map: grammar.wordToCluster
         };
 
-        // Ensure every vocab word has an embedding (zero gaps)
-        const vocabWords = Object.values(evolvedModel.vocab);
-        for (const word of vocabWords) {
-            const tokenId = Object.keys(evolvedModel.vocab).find(key => evolvedModel.vocab[key] === word);
-            if (!evolvedModel.semanticEmbeddings[tokenId]) {
-                // Generate synthetic embedding to maintain coverage
-                evolvedModel.semanticEmbeddings[tokenId] =
-                    Array.from(new Float32Array(768)).map(() => Math.random() * 0.01);
-            }
-        }
+        unified.charVocab = decoder.charVocab;
 
-        console.log(`   ✅ Complete semantic coverage: ${Object.keys(evolvedModel.semanticEmbeddings).length} embeddings`);
-        console.log(`   ✅ Zero semantic gaps maintained`);
-
-        // Save evolved model
-        const modelPath = `${this.outputPrefix}.json`;
-        await fs.writeFile(modelPath, JSON.stringify(evolvedModel, null, 2));
-
-        // 🔄 FULL PIPELINE MISMATCH FIX: Regenerate GPT-own and own-vocab mappings
-        console.log('   🔄 Generating complete GPT-own and own-vocab mappings...');
-
-        const gptToOwn = {};
-        const ownVocab = {};
-
-        // Map complete evolved vocabulary - FIXED: tokenID -> word string, not numbers!
-        Object.entries(evolvedModel.vocab).forEach(([tokenId, word]) => {
-            if (typeof word === 'string' && word.trim()) {
-                gptToOwn[tokenId] = tokenId;  // GPT tokenId → Our tokenId (same for this implementation)
-                ownVocab[tokenId] = word;     // Our tokenId → actual word string
-            }
-        });
-
-        // Save GPT-own mapping
-        const gptToOwnPath = `${this.outputPrefix}-gpt-to-own.json`;
-        await fs.writeFile(gptToOwnPath, JSON.stringify({
-            gptToOwn: gptToOwn,
-            metadata: {
-                generatedFromEvolution: true,
-                originalTokens: 375,
-                evolvedTokens: Object.keys(gptToOwn).length,
-                evolutionDate: new Date().toISOString()
-            }
-        }));
-
-        // Save own-vocab mapping
-        const vocabPath = `${this.outputPrefix}-own-vocab.json`;
-        await fs.writeFile(vocabPath, JSON.stringify({
-            ownVocab: ownVocab,
-            metadata: {
-                generatedFromEvolution: true,
-                totalTokens: Object.keys(ownVocab).length,
-                evolutionDate: new Date().toISOString()
-            }
-        }));
-
-        console.log(`   ✅ Complete GPT-own mapping saved: ${gptToOwnPath} (${Object.keys(gptToOwn).length} mappings)`);
-        console.log(`   ✅ Complete own-vocab saved: ${vocabPath} (${Object.keys(ownVocab).length} words)`);
-
-        // Also update the predictor to use full evolved vocabulary size
-        if (this.priorDecoderData?.vocab) {
-            const evolvedVocabSize = Object.keys(evolvedModel.vocab).length;
-            console.log(`   ✅ Evolved model ready: ${evolvedVocabSize} words (${Object.keys(evolvedModel.vocab).length - 375} new)`);
-            console.log('   🚀 Use: node unified-chat-fixed.js ./unified-aether-v2.json');
-        }
-
-        console.log(`   💾 Saved hybrid-evolved model: ${modelPath}`);
-    }
-
-    /**
-     * Analyze corpus to understand training needs
-     */
-    async analyzeCorpus() {
-        const content = await fs.readFile(this.corpusPath, 'utf8');
-        const words = [...new Set(
-            content.match(/[a-zA-Z]+/g) || []
-        )].filter(word => word.length >= 2 && word.length <= 15).map(word => word.toLowerCase());
-
-        console.log(`   📊 Corpus: ${words.length} unique words`);
-        return words;
-    }
-
-    /**
-     * Extend vocab mappings using reference for duplicate prevention
-     */
-    async extendVocabWithReference(corpusWords) {
-        console.log('🗺️ Extending vocabulary with reference guidance...');
-
-        let addedWords = 0;
-        for (const word of corpusWords) {
-            // Check if word already exists in reference (duplicate prevention)
-            if (!this.referenceVocabWordToToken.has(word)) {
-                // New word - add to extended vocab
-                const newTokenId = this.nextTokenId++;
-                this.referenceVocabWordToToken.set(word, newTokenId);
-                this.referenceVocabTokenToWord.set(newTokenId, word);
-                addedWords++;
-
-                if (addedWords % 100 === 0) {
-                    console.log(`      Extended vocab: +${addedWords} new words...`);
-                }
-            }
-        }
-
-        console.log(`   ✅ Vocabulary extended: +${addedWords} new words (no duplicates)`);
-    }
-
-    /**
-     * Generate embeddings using GPT guided by semantic similarity to reference
-     */
-    async extendEmbeddingsWithReference(corpusWords) {
-        console.log('🎯 Generating reference-guided embeddings...');
-
-        let generatedEmbeddings = 0;
-
-        for (const word of corpusWords) {
-            const tokenId = this.referenceVocabWordToToken.get(word);
-
-            if (!this.referenceEmbeddings[tokenId]) {
-                // Need embedding for this new word
-                const embedding = await this.generateGuidedEmbedding(word);
-
-                if (embedding) {
-                    this.referenceEmbeddings[tokenId] = embedding;
-                    generatedEmbeddings++;
-                }
-
-                if (generatedEmbeddings % 50 === 0) {
-                    console.log(`      Generated embeddings: ${generatedEmbeddings}...`);
-                }
-            }
-        }
-
-        console.log(`   ✅ Embeddings generated: ${generatedEmbeddings} guided by semantic similarity`);
-    }
-
-    /**
-     * Generate embedding using GPT, guided by similarity to reference embeddings
-     */
-    async generateGuidedEmbedding(word) {
+        // 16-bit BPE vocab
         try {
-            // Get GPT embedding
-            const gptEmbedding = await this.gptTutor.getEmbedding(word);
-            if (!gptEmbedding) return null;
-
-            // Find semantically similar reference embeddings
-            const similarRefs = this.findSemanticallySimilar(word, 3);
-
-            if (similarRefs.length > 0) {
-                // Blend GPT embedding with similar reference embeddings
-                const blendRatio = 0.7; // 70% GPT, 30% reference
-                const blended = this.blendEmbeddings(gptEmbedding, similarRefs, blendRatio);
-                return blended;
-            } else {
-                // No similar references, use GPT embedding directly
-                return Array.from(gptEmbedding);
-            }
-        } catch (error) {
-            console.log(`   ⚠️ Failed to generate embedding for "${word}"`);
-            return null;
+            unified.vocab = JSON.parse(await fs.readFile(`${this.outputPrefix}-gpt-to-own.json`));
+            console.log(`   ✓ 16-bit BPE vocab loaded (${Object.keys(unified.vocab).length} entries) <3`);
+        } catch (e) {
+            unified.vocab = {};
+            console.log('   ⚠️  No BPE vocab, using decoder vocab');
         }
-    }
 
-    /**
-     * Find reference embeddings that are semantically similar
-     */
-    findSemanticallySimilar(targetWord, maxResults = 3) {
-        const similarities = [];
+        const newVocabSize = Object.keys(decoder.vocab).length;
+        unified.ownVocab = decoder.vocab;
+        console.log(`   ✓ Decoder vocab: ${newVocabSize} words with Phase 1 semantics!`);
 
-        for (const [tokenId, embedding] of Object.entries(this.referenceEmbeddings)) {
-            // Could use word embeddings or simple string similarity
-            const word = this.referenceVocabTokenToWord.get(parseInt(tokenId));
-            if (!word) continue;
+        // 🎯 PRESERVE ALL EMBEDDINGS FROM ALL PHASES - NO GAPS ALLOWED
+        console.log('🧠 Merging semantic embeddings from all phases...');
 
-            // Simple similarity metric (could be improved with actual embedding similarity)
-            const similarity = this.simpleSemanticSimilarity(targetWord, word);
-            similarities.push({
-                tokenId: parseInt(tokenId),
-                embedding: embedding,
-                similarity: similarity
+        // Foundation: Base embeddings from Phase 1 (if any)
+        let mergedEmbeddings = {};
+        if (decoder.semanticEmbeddings) {
+            // These are the original Phase 1↔2 semantic foundations
+            Object.entries(decoder.semanticEmbeddings).forEach(([tokenId, embedding]) => {
+                mergedEmbeddings[tokenId] = Array.from(new Float32Array(embedding));
             });
+            console.log(`   🔧 Phase 1+2 base: ${Object.keys(mergedEmbeddings).length} semantic foundations`);
         }
 
-        return similarities
-            .filter(item => item.similarity > 0.3) // Filter for meaningful similarity
-            .sort((a, b) => b.similarity - a.similarity)
-            .slice(0, maxResults);
-    }
-
-    /**
-     * Simple semantic similarity (placeholder - could use more sophisticated methods)
-     */
-    simpleSemanticSimilarity(word1, word2) {
-        // Basic string similarity and length similarity
-        const chars1 = new Set(word1.toLowerCase());
-        const chars2 = new Set(word2.toLowerCase());
-
-        const intersection = new Set([...chars1].filter(x => chars2.has(x)));
-        const union = new Set([...chars1, ...chars2]);
-
-        const jaccardSimilarity = intersection.size / union.size;
-        const lengthSimilarity = 1 - Math.abs(word1.length - word2.length) / Math.max(word1.length, word2.length);
-
-        return (jaccardSimilarity * 0.7) + (lengthSimilarity * 0.3);
-    }
-
-    /**
-     * Blend embedding with reference embeddings
-     */
-    blendEmbeddings(gptEmbedding, referenceEmbeddings, blendRatio = 0.7) {
-        const blended = new Float32Array(gptEmbedding.length);
-
-        // Start with GPT embedding
-        for (let i = 0; i < gptEmbedding.length; i++) {
-            blended[i] = gptEmbedding[i] * blendRatio;
+        // Phase 2 evolution: Own_ID embeddings with refined semantics
+        if (decoder.semanticEmbeddingsOwnId) {
+            Object.entries(decoder.semanticEmbeddingsOwnId).forEach(([ownId, embedding]) => {
+                mergedEmbeddings[ownId] = Array.from(new Float32Array(embedding));
+            });
+            console.log(`   🚀 Phase 2 evolution: ${Object.keys(decoder.semanticEmbeddingsOwnId).length} refined semantics`);
         }
 
-        // Add reference influence
-        const refRatio = (1 - blendRatio) / referenceEmbeddings.length;
-        for (const ref of referenceEmbeddings) {
-            for (let i = 0; i < ref.embedding.length; i++) {
-                blended[i] += ref.embedding[i] * refRatio;
-            }
-        }
-
-        return Array.from(blended);
-    }
-
-    /**
-     * Train predictor using extended embeddings
-     */
-    async trainPredictorWithReference() {
-        console.log('🎭 Training predictor with guided embeddings...');
-
-        // Create training pairs from corpus using extended embeddings
-        const trainingPairs = await this.buildReferenceGuidedPairs();
-
-        // Initialize fresh predictor (same architecture as reference)
-        const predictor = new TinyTokenPredictor(
-            this.referenceVocabWordToToken.size,
-            768,
-            DEFAULT_CONFIG.hiddenSize
-        );
-
-        // Warm start with reference predictor weights if available
-        if (this.referenceModel.weights?.W_token_1) {
-            predictor.W1 = new Float32Array(this.referenceModel.weights.W_token_1);
-            predictor.b1 = new Float32Array(this.referenceModel.weights.b_token_1);
-            predictor.W2 = new Float32Array(this.referenceModel.weights.W_token_2);
-            predictor.b2 = new Float32Array(this.referenceModel.weights.b_token_2);
-            predictor.isInitialized = true;
-            console.log('   ♻️ Warm started with reference predictor');
-        }
-
-        // Train on new corpus patterns
-        await predictor.trainFromTeacher(trainingPairs, {
-            epochs: DEFAULT_CONFIG.predictorEpochs,
-            learningRate: DEFAULT_CONFIG.predictorLR
-        });
-
-        this.evolvedPredictor = predictor;
-        console.log('   ✅ Predictor trained with new corpus understanding');
-    }
-
-    /**
-     * Build training pairs using reference-guided embeddings
-     */
-    async buildReferenceGuidedPairs() {
-        const corpus = await fs.readFile(this.corpusPath, 'utf8');
-        const pairs = [];
-
-        // Extract sentences and create word-word pairs
-        const sentences = corpus
-            .split(/[.!?\n]+/)
-            .map(s => s.trim())
-            .filter(s => s.length > 10);
-
-        for (const sentence of sentences.slice(0, 1000)) { // Limit for training efficiency
-            const words = sentence.split(/\s+/).filter(w => w.length > 2);
-
-            for (let i = 0; i < words.length - 1; i++) {
-                const currentWord = words[i].toLowerCase();
-                const nextWord = words[i + 1].toLowerCase();
-
-                const currentId = this.referenceVocabWordToToken.get(currentWord);
-                const nextId = this.referenceVocabWordToToken.get(nextWord);
-
-                if (currentId !== undefined && nextId !== undefined && this.referenceEmbeddings[currentId]) {
-                    pairs.push({
-                        embedding: new Float32Array(this.referenceEmbeddings[currentId]),
-                        targetTokenId: nextId
-                    });
-                }
-            }
-        }
-
-        console.log(`   📊 Built ${pairs.length} reference-guided training pairs`);
-        return pairs;
-    }
-
-    /**
-     * Save evolved model that chat can use
-     */
-    async saveEvolvedModel() {
-        console.log('💾 Saving evolved model...');
-
-        // Create evolved model that preserves all reference capabilities + new learning
-        const evolvedModel = {
-            ...this.referenceModel, // Preserve ALL reference structure
-
-            // Update with new evolution
-            version: `${this.referenceModel.version}-evolved-${Date.now()}`,
-            semanticEmbeddings: this.referenceEmbeddings, // Complete embeddings by token ID
-
-            // Update predictor weights with new training
-            weights: {
-                ...this.referenceModel.weights,
-                W_token_1: Array.from(this.evolvedPredictor.W1),
-                b_token_1: Array.from(this.evolvedPredictor.b1),
-                W_token_2: Array.from(this.evolvedPredictor.W2),
-                b_token_2: Array.from(this.evolvedPredictor.b2)
-            },
-
-            // Extended vocab mappings
-            vocab: {},
-            metadata: {
-                ...this.referenceModel.metadata,
-                evolutionDate: new Date().toISOString(),
-                evolvedFrom: this.referenceModelPath,
-                trainingCorpus: this.corpusPath,
-                newTokensAdded: Math.max(0, this.nextTokenId - Object.keys(this.referenceModel.semanticEmbeddings || {}).length),
-                totalEmbeddings: Object.keys(this.referenceEmbeddings).length
-            }
-        };
-
-        // Add vocab in the format chat expects
-        for (const [word, tokenId] of this.referenceVocabWordToToken.entries()) {
-            evolvedModel.vocab[tokenId] = word;
-        }
-
-        // Also add the 16-bit vocab fields for compatibility
-        evolvedModel.ownVocab = evolvedModel.vocab;
-
-        // Save model
-        const modelPath = `${this.outputPrefix}.json`;
-        await fs.writeFile(modelPath, JSON.stringify(evolvedModel, null, 2));
-
-        // Save GPT→own mappings for compatibility
-        const mappings = { gptToOwn: {}, ownVocab: evolvedModel.ownVocab };
-        for (const [tokenId, word] of Object.entries(evolvedModel.ownVocab)) {
-            mappings.gptToOwn[tokenId] = tokenId; // Simplified for this implementation
-        }
-        await fs.writeFile(`${this.outputPrefix}-gpt-to-own.json`, JSON.stringify(mappings));
-
-        console.log(`   ✅ Evolved model saved: ${modelPath}`);
-        console.log(`   📊 Complete semantic coverage: ${Object.keys(evolvedModel.semanticEmbeddings).length} embeddings`);
-
-        return evolvedModel;
-    }
-
-    refineEmbeddingWithFoundation(gptEmbedding, foundationSemantics) {
-        // Find closest foundation embeddings and average to refine
-        const similarities = Object.entries(foundationSemantics).map(([word, emb]) => ({
-            word,
-            similarity: this.cosSimilarity(gptEmbedding, new Float32Array(emb)),
-            embedding: new Float32Array(emb)
-        })).sort((a, b) => b.similarity - a.similarity);
-
-        // Average with top 3 closest foundation embeddings
-        const topK = similarities.slice(0, 3);
-        const refined = new Float32Array(768);
-
-        for (let i = 0; i < 768; i++) {
-            refined[i] = gptEmbedding[i]; // Start with GPT embedding
-        }
-
-        // Weight foundation influence (0.3) vs GPT (0.7)
-        const foundationWeight = 0.3;
-        const gptWeight = 0.7;
-
-        if (topK.length > 0) {
-            for (let i = 0; i < 768; i++) {
-                let foundationAvg = 0;
-                for (const item of topK) {
-                    foundationAvg += item.embedding[i];
-                }
-                foundationAvg /= topK.length;
-
-                refined[i] = (gptEmbedding[i] * gptWeight) + (foundationAvg * foundationWeight);
-            }
-        }
-
-        return refined;
-    }
-
-    async buildFoundationGuidedPairs(corpusPath, semantics, mappings, epochs) {
-        console.log('📚 Building foundation-guided training pairs...');
-
-        const corpus = await fs.readFile(corpusPath, 'utf8');
-        const lines = corpus.split('\n').map(l => l.trim()).filter(l => l.length > 10).slice(0, 100); // Limit for efficiency
-
-        const pairs = [];
-        for (const line of lines) {
-            const words = line.split(/\s+/).filter(w => w.length > 2).map(w => w.toLowerCase());
-
-            for (let i = 0; i < words.length - 1; i++) {
-                const currentWord = words[i];
-                const nextWord = words[i + 1];
-
-                // Get token IDs from mappings
-                let currentId = null;
-                let nextId = null;
-
-                for (const [ownId, vocabWord] of Object.entries(mappings.ownVocab)) {
-                    if (vocabWord === currentWord) currentId = parseInt(ownId);
-                    if (vocabWord === nextWord) nextId = parseInt(ownId);
-                }
-
-                if (currentId !== null && nextId !== null && semantics[currentWord]) {
-                    pairs.push({
-                        embedding: new Float32Array(semantics[currentWord]),
-                        targetTokenId: nextId
-                    });
-                }
-            }
-        }
-
-        console.log(`   📊 Built ${pairs.length} foundation-guided training pairs`);
-        return pairs;
-    }
-
-    cosSimilarity(a, b) {
-        let dot = 0, normA = 0, normB = 0;
-        for (let i = 0; i < a.length; i++) {
-            dot += a[i] * b[i];
-            normA += a[i] * a[i];
-            normB += b[i] * b[i];
-        }
-        return dot / (Math.sqrt(normA) * Math.sqrt(normB));
-    }
-
-    /**
-     * Load Phase 1 embeddings cache for use in Phase 2 training
-     */
-    async loadPhase1EmbeddingsForTraining() {
+        // Load any additional semantic info from Phase 1 cache (if exists)
         const cacheFile = `${this.outputPrefix}-cache-aether.json`;
         try {
-            const cacheContent = await fs.readFile(cacheFile, 'utf8');
-            const cache = JSON.parse(cacheContent);
-            return cache.pairs || [];
+            const cache = JSON.parse(await fs.readFile(cacheFile, 'utf8'));
+            if (cache.semanticRefinements) {
+                Object.entries(cache.semanticRefinements).forEach(([key, embedding]) => {
+                    mergedEmbeddings[key] = Array.from(new Float32Array(embedding));
+                });
+                console.log(`   🧬 Cache refinements: ${Object.keys(cache.semanticRefinements).length} additional embeddings`);
+            }
         } catch (e) {
-            console.log(`   ⚠️ Could not load Phase 1 cache: ${e.message}`);
-            return [];
+            // No additional cache - that's fine
         }
+
+        // CRITICAL: Ensure every possible token has semantic representation
+        const finalEmbeddings = {};
+        const allVocabWords = Object.values(unified.ownVocab);
+
+        // For each word in our vocab, ensure its token ID has an embedding
+        for (const word of allVocabWords) {
+            const tokenIdStr = Object.keys(unified.ownVocab).find(key => unified.ownVocab[key] === word);
+
+            if (tokenIdStr !== undefined) {
+                const tokenId = parseInt(tokenIdStr);
+
+                if (mergedEmbeddings[tokenId]) {
+                    finalEmbeddings[tokenId] = mergedEmbeddings[tokenId];
+                } else if (mergedEmbeddings[word]) {
+                    // Fallback to word-keyed embeddings
+                    finalEmbeddings[tokenId] = mergedEmbeddings[word];
+                } else {
+                    // CRITICAL FAILURE: Generate synthetic embedding to prevent gaps
+                    console.log(`   ⚠️ SEMANTIC GAP DETECTED for token ${tokenId} (${word}) - generating synthetic`);
+                    const syntheticEmbedding = new Float32Array(1280);
+                    for (let i = 0; i < 1280; i++) {
+                        syntheticEmbedding[i] = (Math.random() - 0.5) * 0.1; // Small random noise
+                    }
+                    finalEmbeddings[tokenId] = Array.from(syntheticEmbedding);
+                }
+            }
+        }
+
+        // Store the comprehensive no-gap semantic embeddings
+        unified.semanticEmbeddings = finalEmbeddings;
+        console.log(`   ✅ COMPLETE semantic coverage: ${Object.keys(finalEmbeddings).length} embeddings (no gaps allowed!)`);
+
+
+        unified.architecture.vocabSize = newVocabSize;
+
+        const jsonPath = `${this.outputPrefix}.json`;
+        const jsonSize = JSON.stringify(unified).length / 1024 / 1024;
+
+        console.log(`💾 Saving unified model: ${jsonPath} (${jsonSize.toFixed(2)} MB)\n`);
+
+        try {
+            await fs.writeFile(jsonPath, JSON.stringify(unified, null, 2));
+            console.log(`✅ Phase 4 complete! Semantic flow preserved through all phases!\n`);
+        } catch (e) {
+            console.error('❌ JSON write failed:', e.message);
+            throw e;
+        }
+
+        return { jsonPath };
     }
 
-    /**
-     * Generate vocab mappings immediately after word resolution (CRITICAL FIX)
-     * Following user's exact instructions: Open old json → start from end of map →
-     * map next items incrementally → return exact GPT maps like converged_pipe_2.js
-     */
-    async generateVocabMappingsPostTraining() {
-        console.log('🔄 Generating vocab mappings AFTER word resolution phase...');
+    async runFullPipeline(options = {}) {
+        const startTime = Date.now();
 
-        if (!this.evolvedVocab || Object.keys(this.evolvedVocab).length === 0) {
-            console.error('   ❌ No evolved vocab found! Cannot generate mappings.');
-            return;
+        const aetherPath = `${this.outputPrefix}-aether-core.json`;
+        if (existsSync(aetherPath)) {
+            console.log(`   📄 Skipping Æther Core: already exists (${aetherPath})\n`);
+        } else {
+            console.log('   🏭 Running Phase 1: Æther Core');
+            await this.trainPhase1_AetherCore({
+                epochs: options.aetherEpochs || 200,
+                learningRate: options.aetherLR || 0.02,
+                hiddenSize: options.hiddenSize || 512
+            });
         }
 
-        console.log(`   📖 Building mappings for ${Object.keys(this.evolvedVocab).length} evolved words...`);
-
-        // === FOLLOW USER'S EXACT INSTRUCTIONS: OPEN OLD JSON ===
-        const existingGptToOwn = JSON.parse(await fs.readFile('./unified-aether-gpt-to-own.json', 'utf8'));
-        const existingOwnVocab = JSON.parse(await fs.readFile('./unified-aether-own-vocab.json', 'utf8'));
-
-        // === START FROM END OF MAP (highest existing custom token ID) ===
-        const highestExistingCustom = Math.max(...Object.keys(existingOwnVocab).map(k => parseInt(k)));
-        console.log(`   📚 Opened old json: unified-aether-gpt-to-own.json`);
-        console.log(`   🏁 Starting from end of map: custom token ${highestExistingCustom}`);
-        console.log(`   🎯 Will map next items incrementally: ${highestExistingCustom + 1} to 895 (target)`);
-        console.log(`   📊 Need to add ${895 - highestExistingCustom} new mappings`);
-
-        // === MAP NEXT ITEMS INCREMENTALLY (end to 895) ===
-        const remainingWords = Object.entries(this.evolvedVocab).filter(([tokenId, word]) => {
-            return !existingOwnVocab[tokenId] && typeof word === 'string' && word.trim();
-        });
-
-        console.log(`   📝 Found ${remainingWords.length} words requiring mapping`);
-
-        let nextCustomId = highestExistingCustom + 1;
-
-        // === RETURN EXACT GPT MAPS FOR THOSE WORDS (Like converged_pipe_2.js) ===
-        // Since done through pure JS, can map all words at once for ease
-        for (const [tokenId, word] of remainingWords) {
-            try {
-                // Get exact GPT token ID like converged_pipe_2.js does
-                const tokens = await this.tokenizer.encode(word);
-                const gptTokenId = tokens[0];
-
-                // Map: exact GPT token ID → incremental custom token ID
-                existingGptToOwn[gptTokenId.toString()] = nextCustomId;
-                existingOwnVocab[nextCustomId.toString()] = word;
-
-                if (nextCustomId < highestExistingCustom + 5) {
-                    console.log(`      📝 Mapped GPT ${gptTokenId} → Custom ${nextCustomId} ("${word}")`);
-                }
-
-                nextCustomId++;
-
-                // Stop when we reach the target (374 old + 521 new = 895 total)
-                if (nextCustomId > 895) break;
-
-            } catch (e) {
-                console.log(`      ⚠️ Failed to encode: "${word}" - skipping`);
-            }
+        const decoderPath = `${this.outputPrefix}-decoder.json`;
+        if (existsSync(decoderPath)) {
+            console.log(`   📄 Skipping Semantic Decoder: already exists (${decoderPath})\n`);
+        } else {
+            console.log('   🏭 Running Phase 2: Semantic Decoder');
+            await this.trainPhase2_SemanticDecoder({
+                maxSamples: options.decoderSamples || 5000,
+                hiddenDim: options.hiddenSize || 512,
+                epochs: options.decoderEpochs || 100,
+                learningRate: options.decoderLR || 0.002
+            });
         }
 
-        console.log(`   ✅ Extended mappings complete: ${Object.keys(existingOwnVocab).length} total words`);
 
-        // === SAVE UPDATED MAPPINGS (user requested overwrite) ===
-        await fs.writeFile('./unified-aether-gpt-to-own.json', JSON.stringify(existingGptToOwn, null, 2));
-        await fs.writeFile('./unified-aether-own-vocab.json', JSON.stringify(existingOwnVocab, null, 2));
 
-        console.log(`   ✅ Map file saved: unified-aether-gpt-to-own.json (${Object.keys(existingGptToOwn).length} mappings)`);
-        console.log(`   ✅ Vocab file saved: unified-aether-own-vocab.json (${Object.keys(existingOwnVocab).length} words)`);
-
-        // === USER'S APPROACH COMPLETED ===
-        // Originals stay at same BPE's ✓
-        // Maps next items incrementally ✓
-        // Returns exact GPT maps like converged_pipe_2.js ✓
-
-        console.log('   🎉 User\'s exact approach implemented successfully!\n');
-    }
-
-    /**
-     * Extract word-level embedding by averaging sentence embeddings containing the word
-     */
-    async extractWordLevelEmbedding(word, phase1Embeddings) {
-        // Load corpus to find sentences containing this word
-        const content = await fs.readFile(this.corpusPath, 'utf8');
-        const sentences = content.split(/[.!?\n]+/).map(s => s.trim()).filter(s => s.length > 10);
-
-        const embeddingSum = new Float32Array(768).fill(0);
-        let validCount = 0;
-
-        // Find sentences containing this word and average their embeddings
-        sentences.forEach((sentence, idx) => {
-            if (sentence.toLowerCase().includes(word) && idx < phase1Embeddings.length) {
-                const sentenceEmbedding = new Float32Array(phase1Embeddings[idx].input || phase1Embeddings[idx]);
-                for (let i = 0; i < 768; i++) {
-                    embeddingSum[i] += sentenceEmbedding[i];
-                }
-                validCount++;
-            }
-        });
-
-        if (validCount > 0) {
-            const avgEmbedding = new Float32Array(768);
-            for (let i = 0; i < 768; i++) {
-                avgEmbedding[i] = embeddingSum[i] / validCount;
-            }
-            return avgEmbedding;
+        const grammarPath = `${this.outputPrefix}-grammar.json`;
+        if (existsSync(grammarPath)) {
+            console.log(`   📄 Skipping Grammar Induction: already exists (${grammarPath})\n`);
+        } else {
+            console.log('   🏭 Running Phase 2.5: Grammar Induction');
+            await this.trainPhase2_5_Grammar(decoderPath, {
+                numClusters: 64
+            });
         }
 
-        return null; // Fallback if no embeddings found
+        const predictorPath = `${this.outputPrefix}-predictor.json`;
+        if (existsSync(predictorPath)) {
+            console.log(`   📄 Skipping Predictor: already exists (${predictorPath})\n`);
+        } else {
+            console.log('   🏭 Running Phase 3: Token Predictor');
+            await this.trainPhase3_TokenPredictor(decoderPath, grammarPath, {
+                learningRate: options.predictorLR || 0.00017724,
+                hiddenSize: options.hiddenSize || 512,
+                batchSizeSonnets: options.batchSizeSonnets || 50,
+                batchEpochs: options.batchEpochs || 30,
+                interruptMs: options.interruptMs || 428.57,
+                patience: 2
+            });
+        }
+
+        const textgenPath = `${this.outputPrefix}-textgen.json`;
+        if (existsSync(textgenPath)) {
+            console.log(`   📄 Skipping Text Generation: already exists (${textgenPath})\n`);
+        } else {
+            console.log('   🏭 Running Phase 3.5: Text Generation (Mirror Pipeline)');
+            await this.trainPhase3_5_TextGeneration(decoderPath, grammarPath, predictorPath, {
+                learningRate: options.textgenLR || 0.00015,
+                hiddenSize: options.hiddenSize || 512,
+                phase3Weight: 0.5,  // 50% Phase 3 predictor
+                gptWeight: 0.5,     // 50% GPT targets
+                batchSizeSonnets: options.batchSizeSonnets || 50,
+                batchEpochs: options.batchEpochs || 3,
+                interruptMs: options.interruptMs || 428.57,
+                patience: 2
+            });
+        }
+
+        console.log('\n🏭 Running Phase 4: Final Merge');
+        const { jsonPath } = await this.mergePhase4(aetherPath, decoderPath, predictorPath, textgenPath, grammarPath);
+
+        const totalTime = Math.floor((Date.now() - startTime) / 1000);
+        console.log('╔═══════════════════════════════════════════════════════════════╗');
+        console.log('║           SEMANTIC FLOW TRAINING COMPLETE! 🎉                 ║');
+        console.log('║           Phase 1 → Phase 2 → Phase 3 → Phase 3.5 → Unified  ║');
+        console.log('╚═══════════════════════════════════════════════════════════════╝\n');
+        console.log(`⏱️  Total: ${Math.floor(totalTime / 60)}m ${totalTime % 60}s`);
+        console.log(`🚀 Test: node unified-chat.js ${jsonPath}\n`);
+        console.log(`💝 16-bit BPE vocab preserved for your future!\n`);
     }
 }
 
 async function main() {
-    const [, , teacherModelPath, corpusPath, outputPrefix] = process.argv;
-    if (!teacherModelPath || !corpusPath) {
-        console.error('Usage: node continual-training.js <teacher-model.json> <corpus.txt> [output-prefix]');
+    const oldModelPath = process.argv[2];
+    const corpusPath = process.argv[3];
+    const outputPrefix = process.argv[4];
+
+    if (!oldModelPath || !corpusPath || !outputPrefix) {
+        console.log('Usage: node continual-training.js <old-model.json> <new-corpus.txt> <output-prefix>');
         process.exit(1);
     }
 
-    const pipeline = new ContinualTrainingPipeline();
-    await pipeline.initialize(corpusPath, teacherModelPath, outputPrefix);
-    // Use values from the top-level DEFAULT_CONFIG (can still override via command line if needed)
-    await pipeline.runContinualTraining({});
+    const pipeline = new UnifiedAetherPipeline();
+    await pipeline.initialize(corpusPath, outputPrefix, oldModelPath);
+
+    await pipeline.runFullPipeline({
+        aetherEpochs: 83,
+        aetherLR: 0.02,
+        decoderSamples: 50000,
+        decoderEpochs: 25,
+        decoderLR: 0.002,
+        batchSizeSonnets: 16,
+        batchEpochs: 2,
+        predictorLR: 0.0002,
+        interruptMs: 214.285,
+        hiddenSize: 512
+    });
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
     main().catch(error => {
-        console.error('Fatal error:', error);
+        console.error('💥 Fatal:', error);
         process.exit(1);
     });
 }
 
-export default ContinualTrainingPipeline;
+export { SemanticHangmanDecoder };
+export { UnifiedAetherPipeline };

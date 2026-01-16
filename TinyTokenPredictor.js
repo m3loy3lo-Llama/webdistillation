@@ -1,40 +1,41 @@
 /**
  * TINY TOKEN PREDICTOR
  * A small neural network that learns to predict next tokens
- * 
- * Architecture: Embedding (768) → Hidden (256) → Vocab (50257)
+ *
+ * Architecture: Embedding (1280) → Hidden (304) → Vocab (50257)
  * Total params: ~200M (vs SmolLM2's 270M)
- * 
+ *
  * This model can GENERATE TEXT, not just transform embeddings!
  */
 
 import fs from 'fs/promises';
 
 class TinyTokenPredictor {
-    constructor(vocabSize = 50257, embeddingSize = 768, hiddenSize = 304) {
+    constructor(vocabSize = 50257, embeddingSize = 1280, hiddenSize = 304) {
         this.vocabSize = vocabSize;      // Full GPT-2 vocabulary
         this.embeddingSize = embeddingSize; // Input from sentence embedding
         this.hiddenSize = hiddenSize;     // Hidden layer size
-        
+
         // Layer 1: embedding → hidden
         this.W1 = this.xavierInit(embeddingSize, hiddenSize);
         this.b1 = new Float32Array(hiddenSize).fill(0);
-        
+
         // Layer 2: hidden → vocabulary predictions
         this.W2 = this.xavierInit(hiddenSize, vocabSize);
         this.b2 = new Float32Array(vocabSize).fill(0);
-        
+
         this.isInitialized = true;
-        
+        this.freezeEmbedding = false;
+
         const params = this.countParams();
         const sizeMB = (params * 4) / (1024 * 1024);
-        
+
         console.log('🎯 Tiny Token Predictor initialized:');
         console.log(`   Vocab: ${vocabSize.toLocaleString()}, Hidden: ${hiddenSize}`);
         console.log(`   Parameters: ${params.toLocaleString()} (~${Math.round(sizeMB)}MB)`);
         console.log(`   Can predict ${vocabSize.toLocaleString()} different tokens!`);
     }
-    
+
     /**
      * Xavier/Glorot initialization
      */
@@ -46,7 +47,7 @@ class TinyTokenPredictor {
         }
         return weights;
     }
-    
+
     /**
      * Forward pass: sentence embedding → token probabilities
      * Returns probability distribution over entire vocabulary
@@ -95,7 +96,7 @@ class TinyTokenPredictor {
 
         return { logits, probs, hidden: hiddenAfterDropout, embedding };
     }
-    
+
     /**
      * Softmax: convert logits to probabilities
      */
@@ -103,67 +104,101 @@ class TinyTokenPredictor {
         const maxLogit = Math.max(...logits);
         const exps = new Float32Array(this.vocabSize);
         let sumExps = 0;
-        
+
         for (let i = 0; i < this.vocabSize; i++) {
             exps[i] = Math.exp(logits[i] - maxLogit);
             sumExps += exps[i];
         }
-        
+
         const probs = new Float32Array(this.vocabSize);
         for (let i = 0; i < this.vocabSize; i++) {
             probs[i] = exps[i] / sumExps;
         }
-        
+
         return probs;
     }
-    
+
     /**
      * Sample a token from probability distribution
      * Uses temperature and top-k sampling for quality
      */
-    sampleToken(probs, temperature = 1.0, topK = 50) {
-        // Temperature scaling
+    sampleToken(probs, temperature = 1.0, topK = 50, topP = 0.9, repetitionPenalty = 1.0, priorTokens = null) {
+        // Temperature scaling & Logit reconstruction
         const scaledLogProbs = new Float32Array(this.vocabSize);
         for (let i = 0; i < this.vocabSize; i++) {
-            scaledLogProbs[i] = Math.log(probs[i] + 1e-10) / temperature;
+            scaledLogProbs[i] = Math.log(probs[i] + 1e-10);
         }
-        
+
+        // Apply Repetition Penalty
+        if (repetitionPenalty !== 1.0 && priorTokens) {
+            const tempSet = new Set(priorTokens);
+            for (const token of tempSet) {
+                if (scaledLogProbs[token] < 0) {
+                    scaledLogProbs[token] *= repetitionPenalty;
+                } else {
+                    scaledLogProbs[token] /= repetitionPenalty;
+                }
+            }
+        }
+
+        // Apply Temperature
+        for (let i = 0; i < this.vocabSize; i++) {
+            scaledLogProbs[i] /= temperature;
+        }
+
         // Re-softmax with temperature
         const maxLogProb = Math.max(...scaledLogProbs);
         const scaledProbs = new Float32Array(this.vocabSize);
         let sumProbs = 0;
-        
+
         for (let i = 0; i < this.vocabSize; i++) {
             scaledProbs[i] = Math.exp(scaledLogProbs[i] - maxLogProb);
             sumProbs += scaledProbs[i];
         }
-        
-        for (let i = 0; i < this.vocabSize; i++) {
-            scaledProbs[i] /= sumProbs;
-        }
-        
-        // Top-k filtering
+
+        // Create indexed array for sorting
         const indexed = [];
         for (let i = 0; i < this.vocabSize; i++) {
+            scaledProbs[i] /= sumProbs;
             indexed.push({ prob: scaledProbs[i], index: i });
         }
+
+        // Sort by probability descending
         indexed.sort((a, b) => b.prob - a.prob);
-        
-        const topKItems = indexed.slice(0, topK);
-        const topKSum = topKItems.reduce((sum, item) => sum + item.prob, 0);
-        
-        // Sample from top-k
-        let random = Math.random() * topKSum;
-        for (const item of topKItems) {
+
+        // TOP-K Filtering
+        const topKFiltered = indexed.slice(0, topK);
+
+        // TOP-P (Nucleus) Filtering
+        // We only keep the top tokens whose cumulative probability <= topP
+        const nucleus = [];
+        let cumulativeProb = 0;
+
+        for (const item of topKFiltered) {
+            cumulativeProb += item.prob;
+            nucleus.push(item);
+            // If we've crossed the threshold, stop adding more tokens
+            // (But always include at least one token)
+            if (cumulativeProb >= topP) {
+                break;
+            }
+        }
+
+        // Normalize the nucleus probabilities
+        const nucleusSum = nucleus.reduce((sum, item) => sum + item.prob, 0);
+
+        // Sample from nucleus
+        let random = Math.random() * nucleusSum;
+        for (const item of nucleus) {
             random -= item.prob;
             if (random <= 0) {
                 return item.index;
             }
         }
-        
-        return topKItems[0].index; // Fallback to most likely
+
+        return nucleus[0].index; // Fallback
     }
-    
+
     /**
      * BOSS-FIGHT trainFromTeacher with WINCON escalation - adaptive learning rate + validation splits
      * Retries epoch attempts until validation improves, escalates strategy under pressure
@@ -293,7 +328,7 @@ class TinyTokenPredictor {
 
         console.log('✅ Token predictor training complete!\n');
     }
-    
+
     /**
      * Backward pass: compute gradients and update weights
      */
@@ -320,12 +355,14 @@ class TinyTokenPredictor {
         }
 
         // Backprop through Layer 1 (with ReLU derivative)
-        for (let i = 0; i < this.hiddenSize; i++) {
-            if (hidden[i] > 0) { // ReLU derivative: 1 if x > 0, else 0
-                this.b1[i] -= learningRate * gradHidden[i];
+        if (!this.freezeEmbedding) {
+            for (let i = 0; i < this.hiddenSize; i++) {
+                if (hidden[i] > 0) { // ReLU derivative: 1 if x > 0, else 0
+                    this.b1[i] -= learningRate * gradHidden[i];
 
-                for (let j = 0; j < this.embeddingSize; j++) {
-                    this.W1[j * this.hiddenSize + i] -= learningRate * gradHidden[i] * embedding[j];
+                    for (let j = 0; j < this.embeddingSize; j++) {
+                        this.W1[j * this.hiddenSize + i] -= learningRate * gradHidden[i] * embedding[j];
+                    }
                 }
             }
         }
@@ -335,6 +372,12 @@ class TinyTokenPredictor {
      * Run one epoch of training
      */
     async _runEpoch(data, lr, batchSize, interruptMs, interruptBatch, training = true) {
+        // Safety check for empty data
+        if (!data || data.length === 0) {
+            console.log('      ⚠️ Empty training data, returning 0 loss');
+            return 0;
+        }
+
         let totalLoss = 0;
         let lastInterrupt = Date.now();
         let exampleCounter = 0;
@@ -377,6 +420,12 @@ class TinyTokenPredictor {
      * Validate the model on data
      */
     async _validate(data) {
+        // Safety check for empty data
+        if (!data || data.length === 0) {
+            console.log('      ⚠️ Empty validation data, returning Infinity loss');
+            return { loss: Infinity, accuracy: 0 };
+        }
+
         let valLoss = 0;
         let valAccuracy = 0;
 
@@ -407,16 +456,16 @@ class TinyTokenPredictor {
      */
     predictTopK(embedding, k = 10) {
         const { probs } = this.forward(embedding);
-        
+
         const indexed = [];
         for (let i = 0; i < this.vocabSize; i++) {
             indexed.push({ tokenId: i, prob: probs[i] });
         }
         indexed.sort((a, b) => b.prob - a.prob);
-        
+
         return indexed.slice(0, k);
     }
-    
+
     /**
      * Save model to file
      */
@@ -440,41 +489,41 @@ class TinyTokenPredictor {
                 parameters: this.countParams()
             }
         };
-        
+
         await fs.writeFile(filepath, JSON.stringify(modelData));
         const stats = await fs.stat(filepath);
         const sizeMB = stats.size / (1024 * 1024);
-        
+
         console.log(`💾 Saved token predictor to ${filepath}`);
         console.log(`   File size: ${sizeMB.toFixed(1)}MB`);
     }
-    
+
     /**
      * Load model from file
      */
     async load(filepath) {
         const modelData = JSON.parse(await fs.readFile(filepath, 'utf8'));
-        
+
         this.vocabSize = modelData.architecture.vocabSize;
         this.embeddingSize = modelData.architecture.embeddingSize;
         this.hiddenSize = modelData.architecture.hiddenSize;
-        
+
         this.W1 = new Float32Array(modelData.weights.W1);
         this.b1 = new Float32Array(modelData.weights.b1);
         this.W2 = new Float32Array(modelData.weights.W2);
         this.b2 = new Float32Array(modelData.weights.b2);
-        
+
         this.isInitialized = true;
-        
+
         console.log(`📂 Loaded token predictor from ${filepath}`);
         console.log(`   Trained: ${modelData.metadata?.trained || 'unknown'}`);
         console.log(`   Parameters: ${this.countParams().toLocaleString()}`);
     }
-    
+
     countParams() {
         return this.W1.length + this.b1.length + this.W2.length + this.b2.length;
     }
-    
+
     getStatus() {
         return {
             initialized: this.isInitialized,

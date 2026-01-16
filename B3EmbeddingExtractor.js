@@ -21,12 +21,12 @@ class B3EmbeddingExtractor {
         this.pipeline = pipeline;
         this.model = pipeline.model;
         this.tokenizer = pipeline.tokenizer;
-        this.hiddenSize = 768; // GPT-2/DistilGPT-2 hidden dimension
+        this.hiddenSize = 1280; // GPT-2 Large hidden dimension
     }
 
     /**
      * Get sentence embedding from GPT-2
-     * Returns Float32Array of size 768
+     * Returns Float32Array of size 1280
      *
      * useRealGpt = true: Extract real hidden states from teacher model
      * useRealGpt = false (default): Synthetic embeddings for consistency

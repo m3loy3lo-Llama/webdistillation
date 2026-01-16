@@ -184,7 +184,7 @@ class B3TrainingPipeline {
      */
     async trainTinyModel(embeddingPairs, options = {}) {
         const {
-            embeddingSize = 768, // Match GPT-2's hidden size
+            embeddingSize = 1280, // Match GPT-2 Large's hidden size
             hiddenSize = 304,
             epochs = 1000,
             learningRate = 0.002,
