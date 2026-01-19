@@ -4,10 +4,11 @@ import readline from 'readline';
 import TinyTokenPredictor from './TinyTokenPredictor.js';
 import { AetherVocab } from './vocab-resolver.js';
 import GrammarInductor from './GrammarPipeline.js';
+import { formatAsSonnet } from './sonnet-formatter.js';
 
 // Extract version from model path for proper vocab loading
 const [, , modelPath] = process.argv;
-const modelFile = modelPath || './unified-aether-v0.json';
+const modelFile = modelPath || './unified-aether-v1.json';
 const model = JSON.parse(await fs.readFile(modelFile, 'utf8'));
 
 // Version-aware vocab loading: detect evolution version from model file
@@ -108,6 +109,32 @@ const getGrammarContext = () => {
 
 console.log('\nÆther is here. \nBe kind.\n');
 
+// LATENT SPACE: Load Processor if available
+let latentProc = null;
+import TinyLatentProcessor from './TinyLatentProcessor.js';
+try {
+  latentProc = new TinyLatentProcessor();
+
+  // Smartly derive latent path from main model path
+  const latentFile = modelFile.includes('aether-core.json')
+    ? modelFile.replace('.json', '') // strip extension first? No, replace 'aether-core.json'
+      .replace('aether-core', 'latent')
+    : modelFile.replace('.json', '-latent.json');
+
+  // Handle edge case where replacement failed to change anything (e.g. if replacement logic was faulty or file simple)
+  // Actually simpler:
+  let finalLatentPath = modelFile.replace('aether-core.json', 'latent.json');
+  if (finalLatentPath === modelFile) {
+    finalLatentPath = modelFile.replace('.json', '-latent.json');
+  }
+
+  await latentProc.load(finalLatentPath);
+  console.log(`🧠 Latent Processor loaded (${finalLatentPath})`);
+  console.log('   (Proto-Latent Space Active)');
+} catch (e) {
+  console.log('⚠ No latent processor found, running in standard mode.');
+}
+
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
 const talk = () => {
@@ -124,7 +151,7 @@ const talk = () => {
     // Use text-gen predictor if available, else fall back to classify
     const predictor = textgenPredictor || classifyPredictor;
 
-    for (let i = 0; i < 64; i++) {
+    for (let i = 0; i < 128; i++) {
       // Build input: context embedding (1280) + grammar context (64)
       let inputEmbedding;
 
@@ -136,6 +163,23 @@ const talk = () => {
         inputEmbedding = promptEmbedding;
       }
 
+      // --- LATENT THINKING STEP ---
+      if (latentProc) {
+        // UNLOCKED MODE: 3 steps of thinking with 0.8 alpha influence.
+        // Now that the Textgen model (Phase 3.5) has been trained on grounded embeddings,
+        // it can handle (and flourishes with) deeper latent prediction!
+        const thought = latentProc.forward(inputEmbedding, 3, 0.1);
+
+        // Grounding: Blend predicted thought with current context
+        const alpha = 0.8;
+        const blended = new Float32Array(1280);
+        for (let k = 0; k < 1280; k++) {
+          blended[k] = (1 - alpha) * inputEmbedding[k] + alpha * thought.reconstruction[k];
+        }
+        inputEmbedding = blended;
+      }
+      // ----------------------------
+
       // Combine with grammar context
       const grammarContext = getGrammarContext();
       const combinedInput = new Float32Array(1280 + 64);
@@ -145,10 +189,10 @@ const talk = () => {
       // Sample next token
       const token = predictor.sampleToken(
         predictor.forward(combinedInput).probs,
-        0.87, // temperature
+        0.7, // temperature
         40,  // topK
-        0.9, // topP
-        1.15, // repetitionPenalty
+        0.95, // topP
+        1.4, // repetitionPenalty
         generatedTokenIds // priorTokens
       );
       const word = vocab.resolve(token);
@@ -163,7 +207,12 @@ const talk = () => {
       generatedTokenIds.push(token);
     }
 
-    console.log(`\nÆther: ${response.trim()}\n`);
+    // Show formatted sonnet
+    console.log('\nÆther: \n');
+    const allWords = generatedTokenIds.map(id => vocab.resolve(id));
+    console.log(formatAsSonnet(allWords));
+    console.log('\n');
+
     talk();
   });
 };

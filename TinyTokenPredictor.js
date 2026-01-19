@@ -369,6 +369,111 @@ class TinyTokenPredictor {
     }
 
     /**
+     * Backward pass for soft targets (knowledge distillation / KL divergence style)
+     * Does NOT impact existing Phase 3 logic.
+     */
+    backwardSoftTarget(forwardResult, softTarget, learningRate) {
+        const { probs, hidden, embedding } = forwardResult;
+
+        // Gradient: probs - softTarget
+        const gradLogits = new Float32Array(this.vocabSize);
+        for (let i = 0; i < this.vocabSize; i++) {
+            gradLogits[i] = probs[i] - softTarget[i];
+        }
+
+        const gradHidden = new Float32Array(this.hiddenSize);
+
+        // Backprop through Layer 2
+        for (let i = 0; i < this.vocabSize; i++) {
+            if (gradLogits[i] === 0) continue;
+
+            this.b2[i] -= learningRate * gradLogits[i];
+            for (let j = 0; j < this.hiddenSize; j++) {
+                const weightIdx = j * this.vocabSize + i;
+                const weight = this.W2[weightIdx];
+                this.W2[weightIdx] -= learningRate * gradLogits[i] * hidden[j];
+                gradHidden[j] += gradLogits[i] * weight;
+            }
+        }
+
+        // Backprop through Layer 1 (with ReLU derivative)
+        if (!this.freezeEmbedding) {
+            for (let i = 0; i < this.hiddenSize; i++) {
+                if (hidden[i] > 0) {
+                    this.b1[i] -= learningRate * gradHidden[i];
+                    for (let j = 0; j < this.embeddingSize; j++) {
+                        this.W1[j * this.hiddenSize + i] -= learningRate * gradHidden[i] * embedding[j];
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Train using soft targets (Mirror / Distillation mode)
+     */
+    async trainWithSoftTargets(pairs, options = {}) {
+        const {
+            epochs = 3,
+            learningRate = 0.0003,
+            validationSplit = 0.1,
+            batchSize = 16,
+            patience = 2
+        } = options;
+
+        let currentLearningRate = learningRate;
+        let bestValLoss = Infinity;
+        let checkpoint = null;
+
+        const shuffled = [...pairs].sort(() => Math.random() - 0.5);
+        const splitIdx = Math.floor(pairs.length * (1 - validationSplit));
+        const trainData = shuffled.slice(0, splitIdx);
+        const valData = shuffled.slice(splitIdx);
+
+        console.log(`🎓 Soft-target training on ${pairs.length} pairs...`);
+
+        for (let epoch = 0; epoch < epochs; epoch++) {
+            let trainLoss = 0;
+            for (const pair of trainData) {
+                const result = this.forward(pair.embedding, true);
+
+                // Cross-entropy with soft targets
+                let loss = 0;
+                for (let i = 0; i < this.vocabSize; i++) {
+                    if (pair.softTarget[i] > 0) {
+                        loss -= pair.softTarget[i] * Math.log(result.probs[i] + 1e-10);
+                    }
+                }
+                trainLoss += loss;
+                this.backwardSoftTarget(result, pair.softTarget, currentLearningRate);
+            }
+            trainLoss /= trainData.length;
+
+            const { loss: valLoss, accuracy: valAcc } = await this._validate(valData);
+
+            if (valLoss < bestValLoss) {
+                bestValLoss = valLoss;
+                checkpoint = {
+                    W1: new Float32Array(this.W1),
+                    b1: new Float32Array(this.b1),
+                    W2: new Float32Array(this.W2),
+                    b2: new Float32Array(this.b2)
+                };
+                console.log(`   ⭐ Epoch ${epoch}: Val Loss = ${valLoss.toFixed(4)}, Acc = ${valAcc.toFixed(1)}%`);
+            } else {
+                if (checkpoint) {
+                    this.W1 = new Float32Array(checkpoint.W1);
+                    this.b1 = new Float32Array(checkpoint.b1);
+                    this.W2 = new Float32Array(checkpoint.W2);
+                    this.b2 = new Float32Array(checkpoint.b2);
+                }
+                currentLearningRate *= 0.5;
+                console.log(`   🔄 Epoch ${epoch}: Val Loss higher, reducing LR to ${currentLearningRate.toFixed(7)}`);
+            }
+        }
+    }
+
+    /**
      * Run one epoch of training
      */
     async _runEpoch(data, lr, batchSize, interruptMs, interruptBatch, training = true) {

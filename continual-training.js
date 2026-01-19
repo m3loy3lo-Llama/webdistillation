@@ -18,6 +18,7 @@ import B3EmbeddingExtractor from './B3EmbeddingExtractor.js';
 import TinyMysticalModel from './B3TinyMysticalModel.js';
 import TinyTokenPredictor from './TinyTokenPredictor.js';
 import GrammarInductor from './GrammarPipeline.js';
+import TinyLatentProcessor from './TinyLatentProcessor.js';
 
 env.localModelPath = process.cwd();
 env.allowRemoteModels = false;
@@ -500,6 +501,81 @@ class UnifiedAetherPipeline {
         }
     }
 
+    async trainPhase1_5_LatentSpace(options = {}) {
+        console.log('╔═══════════════════════════════════════════════════════════════╗');
+        console.log('║  PHASE 1.5: LATENT SPACE (The "Brain" - Thinking Logic)      ║');
+        console.log('╚═══════════════════════════════════════════════════════════════╝\n');
+
+        const { epochs = 20, learningRate = 0.005 } = options;
+
+        // Load Phase 1 semantic embeddings cache
+        const cacheFile = `${this.outputPrefix}-cache-aether.json`;
+        console.log('📦 Loading Phase 1 sentence embeddings for Latent Training...');
+
+        let pairs = [];
+        try {
+            const data = JSON.parse(await fs.readFile(cacheFile, 'utf8'));
+            pairs = data.pairs;
+            console.log(`   ✓ Loaded ${pairs.length} embedding pairs from Phase 1\n`);
+        } catch (e) {
+            console.error('   ❌ Cannot find Phase 1 cache! Run Phase 1 first.');
+            throw new Error('Phase 1 cache required for latent space training');
+        }
+
+        const processor = new TinyLatentProcessor(1280, 256);
+
+        // EVOLUTION MODE: Check for old latent model
+        // EVOLUTION MODE: Check for old latent model
+        // USER UPDATE: Explicitly requested to NOT inherited latent weights (to reduce repetition).
+        // Since Phase 1 "Mirror" training already ensures semantic continuity in the embeddings,
+        // we can train a fresh Latent Processor on these continuous embeddings to get a "Fresh Brain"
+        // that understands the history but doesn't inherit the "bad loops" of the old brain.
+
+        /*
+        if (this.oldModelPath) {
+             let oldLatentPath = this.oldModelPath.replace('aether-core.json', 'latent.json');
+             if (oldLatentPath === this.oldModelPath) oldLatentPath = this.oldModelPath.replace('.json', '-latent.json');
+             
+             if (existsSync(oldLatentPath)) {
+                 console.log(`🧬 EVOLUTION MODE: Loading foundation latent weights from: ${oldLatentPath}`);
+                 await processor.load(oldLatentPath);
+             }
+        }
+        */
+        console.log("✨ STARTING FRESH LATENT BRAIN (Relying on Phase 1 Semantic Continuity)");
+
+        console.log(`🚀 Training Autoencoder (1280 -> 256 -> 1280) for ${epochs} epochs...`);
+        console.log(`   (Using PURE RECONSTRUCTION for Stability)`);
+
+        for (let epoch = 0; epoch < epochs; epoch++) {
+            let totalLoss = 0;
+
+            // Simple Shuffle (Standard for Autoencoders)
+            const shuffled = [...pairs].sort(() => Math.random() - 0.5);
+
+            for (const p of shuffled) {
+                const input = new Float32Array(p.input);
+
+                // Reconstruction only: learn to represent the current state faithfully
+                const loss = processor.trainStep(input, input, learningRate);
+
+                totalLoss += loss;
+            }
+
+            const avgLoss = totalLoss / pairs.length;
+            if (epoch % 5 === 0 || epoch === epochs - 1) {
+                console.log(`   Epoch ${epoch + 1}/${epochs}: Loss = ${avgLoss.toFixed(6)}`);
+            }
+        }
+
+        // Versioned output is handled by this.outputPrefix which allows for v1, v2 etc.
+        const outputPath = `${this.outputPrefix}-latent.json`;
+        await processor.save(outputPath);
+
+        console.log(`✅ Phase 1.5 Latent Space complete: ${outputPath}\n`);
+        return outputPath;
+    }
+
     async trainPhase2_SemanticDecoder(options = {}) {
         console.log('╔═══════════════════════════════════════════════════════════════╗');
         console.log('║  PHASE 2: SEMANTIC HANGMAN DECODER                            ║');
@@ -567,15 +643,15 @@ class UnifiedAetherPipeline {
             const embeddingSum = new Float32Array(1280).fill(0);
             let validCount = 0;
 
-                    for (const idx of sentenceIndices) {
-                        if (idx < cache.pairs.length) {
-                            const sentenceEmbedding = new Float32Array(cache.pairs[idx].input);
-                            for (let i = 0; i < 1280; i++) {
-                                embeddingSum[i] += sentenceEmbedding[i];
-                            }
-                            validCount++;
-                        }
+            for (const idx of sentenceIndices) {
+                if (idx < cache.pairs.length) {
+                    const sentenceEmbedding = new Float32Array(cache.pairs[idx].input);
+                    for (let i = 0; i < 1280; i++) {
+                        embeddingSum[i] += sentenceEmbedding[i];
                     }
+                    validCount++;
+                }
+            }
 
             if (validCount > 0) {
                 // Average the embeddings
@@ -948,6 +1024,17 @@ class UnifiedAetherPipeline {
         await grammar.load(grammarPath);
         console.log(`   ✓ Loaded Grammar Model (${grammar.numClusters} clusters)`);
 
+        // 🧠 LATENT GROUNDING: Load Latent Processor for embedding refinement
+        const latentPath = `${this.outputPrefix}-latent.json`;
+        const latentProc = new TinyLatentProcessor(1280, 256);
+        try {
+            await latentProc.load(latentPath);
+            console.log(`   🧠 Latent Processor loaded for grounding (${latentPath})`);
+        } catch (e) {
+            console.warn(`   ⚠️ Could not load latent processor: ${e.message}`);
+            console.warn('   -> Proceeding with raw embeddings (Stability risk)');
+        }
+
         // 🧬 MIRROR PIPELINE: Load Phase 3 predictor as teacher
         console.log('🧬 MIRROR MODE: Loading Phase 3 predictor as teacher...');
         const phase3Data = JSON.parse(await fs.readFile(predictorPath, 'utf8'));
@@ -1020,6 +1107,13 @@ class UnifiedAetherPipeline {
                     const embedding = wordToSemanticEmbedding.get(currentWord);
 
                     if (embedding) {
+                        // 🧠 GROUNDING: Pass raw embedding through latent bottleneck
+                        let groundedEmbedding = embedding;
+                        if (latentProc.isInitialized) {
+                            const thought = latentProc.forward(embedding, 0, 0.05);
+                            groundedEmbedding = thought.reconstruction;
+                        }
+
                         const gptTargetTokenId = tokenIds[j + 1]; // GPT's "ground truth" (40%)
 
                         // Get Grammar Context
@@ -1028,7 +1122,7 @@ class UnifiedAetherPipeline {
 
                         // Combine: Semantic (1280) + Grammar (64)
                         const combinedInput = new Float32Array(1280 + grammar.numClusters);
-                        combinedInput.set(embedding, 0);
+                        combinedInput.set(groundedEmbedding, 0);
                         combinedInput.set(grammarContext, 1280);
 
                         // Get Phase 3's prediction distribution (60%)
@@ -1073,12 +1167,19 @@ class UnifiedAetherPipeline {
                     const embedding = wordToSemanticEmbedding.get(currentWord);
 
                     if (embedding) {
+                        // 🧠 GROUNDING: Pass raw embedding through latent bottleneck
+                        let groundedEmbedding = embedding;
+                        if (latentProc.isInitialized) {
+                            const thought = latentProc.forward(embedding, 0, 0.05);
+                            groundedEmbedding = thought.reconstruction;
+                        }
+
                         const targetTokenId = tokenIds[j + 1];
                         const currentCluster = grammar.getClusterForWord(currentWord);
                         const grammarContext = grammar.getNextClusterProbs(currentCluster);
 
                         const combinedInput = new Float32Array(1280 + grammar.numClusters);
-                        combinedInput.set(embedding, 0);
+                        combinedInput.set(groundedEmbedding, 0);
                         combinedInput.set(grammarContext, 1280);
 
                         validationPairs.push({ embedding: combinedInput, targetTokenId });
@@ -1494,6 +1595,17 @@ class UnifiedAetherPipeline {
             });
         }
 
+        const latentPath = `${this.outputPrefix}-latent.json`;
+        if (existsSync(latentPath)) {
+            console.log(`   📄 Skipping Latent Space: already exists (${latentPath})\n`);
+        } else {
+            console.log('   🏭 Running Phase 1.5: Latent Space (The Brain)');
+            await this.trainPhase1_5_LatentSpace({
+                epochs: 20,
+                learningRate: 0.005
+            });
+        }
+
         const decoderPath = `${this.outputPrefix}-decoder.json`;
         if (existsSync(decoderPath)) {
             console.log(`   📄 Skipping Semantic Decoder: already exists (${decoderPath})\n`);
@@ -1530,7 +1642,7 @@ class UnifiedAetherPipeline {
                 batchSizeSonnets: options.batchSizeSonnets || 50,
                 batchEpochs: options.batchEpochs || 30,
                 interruptMs: options.interruptMs || 428.57,
-                patience: 2
+                patience: 3
             });
         }
 
@@ -1540,7 +1652,7 @@ class UnifiedAetherPipeline {
         } else {
             console.log('   🏭 Running Phase 3.5: Text Generation (Mirror Pipeline)');
             await this.trainPhase3_5_TextGeneration(decoderPath, grammarPath, predictorPath, {
-                learningRate: options.textgenLR || 0.00015,
+                learningRate: options.textgenLR || 0.0004,
                 hiddenSize: options.hiddenSize || 512,
                 phase3Weight: 0.5,  // 50% Phase 3 predictor
                 gptWeight: 0.5,     // 50% GPT targets
@@ -1580,13 +1692,13 @@ async function main() {
 
     await pipeline.runFullPipeline({
         aetherEpochs: 83,
-        aetherLR: 0.02,
+        aetherLR: 0.01,
         decoderSamples: 50000,
         decoderEpochs: 25,
-        decoderLR: 0.002,
-        batchSizeSonnets: 16,
-        batchEpochs: 2,
-        predictorLR: 0.0002,
+        decoderLR: 0.001,
+        batchSizeSonnets: 69,
+        batchEpochs: 3,
+        predictorLR: 0.000175,
         interruptMs: 214.285,
         hiddenSize: 512
     });
