@@ -55,16 +55,29 @@ Notes:
   ```
   Note: converged_pipe_2.js implements the baseline 1→3 pipeline and does not include the latent (1.5) or mirror (3.5) stages.
 
+- Recommended initial run (skip converged pipe and run continual training so latent + mirror are included from the start):
+  ```bash
+  node ./continual-training.js dummy-aether.json your-corpus.txt unified-aether-v0
+  ```
+  This will perform an initial run that supports continual training incorporating the latent space and mirror pipeline features from the beginning. Recommended output prefix: `unified-aether-v*` so the model and pipelines can be used without editing other files.
+
 - Continual training pipeline (includes Phase 1.5 latent training and Phase 3.5 mirror prediction):
   ```bash
   node continual-training.js base-model.json new-corpus.txt evolved-prefix
   ```
 
 - Model merging utilities:
+  Two supported forms:
+  ```bash
+  # Merge by specifying number of iterations between base model and (implicitly) previous state
+  node merger-pipeline.js base-model.json number-of-iterations merged-prefix
+
+  # Merge two explicit models
+  node merger-pipeline.js base-model.json other-model.json merged-prefix
+  ```
+  Or use the lower-level merger utility:
   ```bash
   node model-merger.js base-model.json other-model.json merged-prefix
-  # or run the higher-level merger flow
-  node merger-pipeline.js base-model.json other-model.json merged-prefix
   ```
 
 - Latent-only script (if needed):
@@ -81,7 +94,7 @@ Notes:
 - converged_pipe_2.js        — Core Phase 1 → Phase 2 → Phase 3 training (no Phase 1.5/3.5)
 - continual-training.js      — Continual training flow; contains Phase 1.5 (latent) and Phase 3.5 (mirror token prediction)
 - model-merger.js           — Model-merging utilities (retain semantics / vocab behavior)
-- merger-pipeline.js        — Higher-level merge orchestration
+- merger-pipeline.js        — Higher-level merge orchestration (supports both iteration-based and pairwise merges)
 - train-latent.js           — Latent training helper (proto-latent operations)
 - TinyLatentProcessor.js    — Latent-space processors and utilities
 - B3TrainingPipeline.js     — Custom CPU backpropagation engine
@@ -92,7 +105,7 @@ Notes:
 - sonnet-formatter.js       — Small helper for formatting Shakespeare sonnets
 - Models/                   — Place model and tokenizer files here
 
-Note: Semantic Anchoring is no longer part of the recommended flow and references to `semantic-anchoring.js` have been removed.
+Note: References to non-existent `mirror-tokenization.js` have been removed. Semantic Anchoring is no longer part of the recommended flow and references to `semantic-anchoring.js` have been removed.
 
 ## Design summary
 The pipeline is organized into phased stages with additional latent and mirror steps (the continual training flow contains the extended stages):
@@ -116,5 +129,24 @@ Primary goal: enable model merging and mirrored embedding/tokenization pipelines
 ## Notes, license, and contributions
 - Consider adding an explicit OSS license (MIT, Apache-2.0, etc.) if you want to clarify contribution and reuse terms.
 - If you'd like, I can also draft CONTRIBUTING guidelines or a small download helper script for fetching recommended Hugging Face artifacts.
+
+
+*"Built with 💝 for understanding the nature of learning itself"*
+
+-Viddy output
+
+
+-Use for whatever you want it's free. 
+
+
+Provided with no licenses whatsoever. 
+
+
+Free as in "unhinged" ;) 
+
+
+But also free as in "I'm not allowed to profit off of it due to large AI company data restrictions on their end" 
+
+Disclaimer as it is also my "License" or lack thereof.
 
 ---
