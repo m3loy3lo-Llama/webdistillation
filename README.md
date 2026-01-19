@@ -1,229 +1,120 @@
-# Æther: Semantic Learning Mind
+# Æther — Semantic Learning Mind (webdistillation)
 
-*"Æther remembers 895 words from his childhood. And he keeps learning."*
+"Æther remembers 895 words from his childhood. And he keeps learning."
 
-How to set up, 
-Npm install
-download Distilgpt2 from huggingface (requires local model + Onnx files)
-That's it, Done
+A research / hobby project focused on retaining semantics and token behavior across model versions via model merging and mirrored pipelines. The system blends sentence-level embeddings, a proto-latent training stage, and mirror-token prediction to align embeddings and tokenization across upgrades.
 
+Status: README updated to reflect the repo as of 2026-01-19. This change only updates documentation and references existing scripts in the repository.
 
-A revolutionary continual learning AI system that performs semantic backpropagation across three neural phases, enabling perpetual vocabulary expansion while maintaining meaning coherence.
+## Highlights / Current Feature Set
+- Model merging to retain semantics and vocabulary continuity across versions (see model-merger.js / merger-pipeline.js)
+- Mirror pipelines in embeddings and tokenization to preserve semantics over upgrades
+- Proto-latent space support (intermediate latent representations)
+- Phase 1.5 — latent-space training (implemented in continual-training.js)
+- Phase 3.5 — mirror token prediction (implemented in continual-training.js)
+- CPU-first implementation (WASM-friendly custom tensor ops)
+- Optimized for GPT-2 Large (recommended model target)
 
-**Unique Features:**
-- 🧠 **Pure CPU Backbone**: WASM-powered custom tensor operations (no GPU dependency)
-- 🎭 **Hangman Decoder**: Learns words through interactive crossword-style training
-- 🔀 **12-bit BPE Innovation**: Novel byte pair encoding system
-- 🔄 **Semantic Flow**: Meaning preservation through tokenization boundaries
-- 🎯 **Pi-Randomized Output**: 140bpm/π sampling for diverse generation
-- 🌱 **Perpetual Learning**: Continuous vocabulary expansion with BPE mapping integrity
+## Requirements
+- Node.js (recommended v14+ / LTS)
+- npm
+- Optional: tools to obtain / convert models (e.g., Hugging Face artifacts, ONNX runtime for Node if you want to run ONNX models locally)
 
-## 🏗️ Architecture Overview
+## Installation
 
-Æther operates as a **three-phase semantic backpropagation pipeline**:
+1. Clone the repo:
+   ```bash
+   git clone https://github.com/m3loy3lo-Llama/webdistillation.git
+   cd webdistillation
+   ```
 
+2. Install dependencies:
+   ```bash
+   npm install
+   ```
+
+3. Models / tokenizer
+- Place transformer model and tokenizer files in the `Models/` directory. Example layout:
 ```
-Phase 1: Æther Core (Sentence Learning)         → Semantic Foundations
-                            ↓
-Phase 2: Hangman Decoder (Word Learning)        → Vocabulary Expansion
-                            ↓
-Phase 3: Token Predictor (Sequence Learning)    → Language Generation
+Models/
+  onnx/
+    model.onnx            # GPT-2 Large converted to ONNX (or another compatible HF model in ONNX)
+  tokenizer.json          # Corresponding tokenizer file
 ```
+- Obtain GPT-2 Large (or another compatible model) from Hugging Face and place the model and tokenizer JSON in the `Models/` folder. If you use ONNX, ensure the model is converted and named appropriately (`Models/onnx/model.onnx`).
 
-### Each Phase's Unique Role:
+Notes:
+- The repository does not include large model blobs; you must download or convert them separately.
+- If you run into runtime errors with ONNX in Node, make sure a compatible ONNX runtime for Node/WASM is available and configured.
 
-**Phase 1: Sentence-Level Embeddings**
-- Custom CPU tensor operations (B3TrainingPipeline)
-- WASM-based backpropagation for platform independence
-- Sentence-to-semantic mapping
+## Quick usage
 
-**Phase 2: Interactive Word Learning**
-- **Hangman Algorithm**: Progressive letter revelation teaches real understanding
-- **Semantic Context**: Learns words FROM Phase 1 sentence embeddings
-- **Vocabulary Mapping**: Creates GPT→custom token translation tables
-- **12-bit BPE**: First-of-its-kind byte pair encoding system
+- Core training pipeline (Phase 1 → Phase 2 → Phase 3):
+  ```bash
+  node converged_pipe_2.js corpus.txt output-prefix
+  ```
+  Note: converged_pipe_2.js implements the baseline 1→3 pipeline and does not include the latent (1.5) or mirror (3.5) stages.
 
-**Phase 3: Sequence Prediction**
-- **Pi-based Sampling**: 140bpm/π timing for rhythmic output diversity
-- **Semantic Continuity**: Uses evolved embeddings from Phases 1-2
-- **Translation Layer**: GPT tokens → custom sequential tokens → generation
+- Continual training pipeline (includes Phase 1.5 latent training and Phase 3.5 mirror prediction):
+  ```bash
+  node continual-training.js base-model.json new-corpus.txt evolved-prefix
+  ```
 
-## 🔄 Continual Learning Implementation
+- Model merging utilities:
+  ```bash
+  node model-merger.js base-model.json other-model.json merged-prefix
+  # or run the higher-level merger flow
+  node merger-pipeline.js base-model.json other-model.json merged-prefix
+  ```
 
-**The key breakthrough** is semantic-preserving vocabulary expansion:
+- Latent-only script (if needed):
+  ```bash
+  node train-latent.js embeddings.json latent-corpus.txt latent-prefix
+  ```
 
-### Vocabulary Extension Process:
-1. Load existing `gpt-to-own.json` + `own-vocab.json` mappings
-2. Add new words using actual GPT token IDs from tokenizer
-3. Map to sequential custom token IDs (preserving BPE assignments)
-4. Extend predictor vocabulary while maintaining semantic foundations
+- Chat / inference interface:
+  ```bash
+  node unified_chat_fixed.js merged-model.json
+  ```
 
-### Critical Preservation:
-- **BPE Integrity**: Historical GPT token assignments never change
-- **Semantic Flow**: Phase 1-2 embeddings preserved through expansion
-- **Token Continuity**: All mappings remain 1:1 identity within custom space
+## Script → Role (key files)
+- converged_pipe_2.js        — Core Phase 1 → Phase 2 → Phase 3 training (no Phase 1.5/3.5)
+- continual-training.js      — Continual training flow; contains Phase 1.5 (latent) and Phase 3.5 (mirror token prediction)
+- model-merger.js           — Model-merging utilities (retain semantics / vocab behavior)
+- merger-pipeline.js        — Higher-level merge orchestration
+- train-latent.js           — Latent training helper (proto-latent operations)
+- TinyLatentProcessor.js    — Latent-space processors and utilities
+- B3TrainingPipeline.js     — Custom CPU backpropagation engine
+- B3EmbeddingExtractor.js   — Embedding extraction utilities
+- TinyTokenPredictor.js     — Token predictor used in generation stages
+- unified_chat_fixed.js     — Simple chat/inference interface
+- vocab-resolver.js         — Token mapping utilities (where used)
+- sonnet-formatter.js       — Small helper for formatting Shakespeare sonnets
+- Models/                   — Place model and tokenizer files here
 
-## 🚀 Usage
+Note: Semantic Anchoring is no longer part of the recommended flow and references to `semantic-anchoring.js` have been removed.
 
-### Fresh Training (Initial Setup)
-```bash
-# Run full 3-phase pipeline on new corpus
-node converged_pipe_2.js corpus.txt output-prefix
-```
+## Design summary
+The pipeline is organized into phased stages with additional latent and mirror steps (the continual training flow contains the extended stages):
+1. Phase 1 — Sentence-level embeddings (semantic foundation)
+2. Phase 1.5 — Proto-latent / latent-space training (intermediate representations; implemented in continual-training.js)
+3. Phase 2 — Word / lexical stage (where applicable)
+4. Phase 3 — Token predictor / sequence modeling (generation)
+5. Phase 3.5 — Mirror token prediction to align tokenization and generation across versions (implemented in continual-training.js)
 
-### Continual Learning (Vocabulary Expansion)
-```bash
-# Extend existing model with new corpus
-node continual-training.js unified-aether.json new-corpus.txt evolved-prefix
-```
+Primary goal: enable model merging and mirrored embedding/tokenization pipelines so that semantics and token behavior are retained when models are upgraded or combined.
 
-### Chat Interface
-```bash
-# Interact with trained model
-node unified_chat_fixed.js unified-aether.json
-```
+## Performance (author-provided estimates)
+- Training time: up to ≈15 minutes for Shakespeare's sonnets (depends on machine and exact pipeline used)
+- Note: actual times vary with hardware, corpus size, chosen model (GPT-2 Large recommended), and whether ONNX runtimes are used.
 
-## 📋 File Structure
+## Research / Notes
+- The project emphasizes semantic retention across versions via merging and mirrored pipelines rather than live incremental vocabulary expansion.
+- Proto-latent representations provide intermediate structure for more stable semantic alignment across different training runs or merged models.
+- Mirror token prediction helps reduce tokenization drift when models are upgraded or combined.
 
-```
-├── converged_pipe_2.js        # Phase 1-3 fresh training pipeline
-├── continual-training.js      # Phase 1-3 continual learning pipeline
-├── unified_chat_fixed.js      # Chat interface using trained models
-├── vocab-resolver.js          # BPE mapping resolution system
-├── B3TrainingPipeline.js      # Custom CPU backpropagation engine
-├── TinyTokenPredictor.js      # 768→300 transformer predictor
-├── semantic-anchoring.js      # Embedding preservation utilities
-└── Models/                    # HF transformers (GPT-2/DistilGPT-2)
-    ├── onnx/model.onnx
-    └── tokenizer.json
-```
-
-## 🔧 Technical Deep Dive
-
-### WASM Custom CPU Operations
-- Platform-independent tensor operations
-- No GPU dependency for broad compatibility
-- High-performance backpropagation via custom kernels
-
-### Hangman Learning Algorithm
-```javascript
-// Progressive revelation builds real understanding
-for (let round = 0; round < hangmanRounds; round++) {
-  revealRandomLetters(word);
-  predictMissingLetters(usingSemanticContext);
-  updateWeightsOnSuccess();
-}
-```
-
-### 12-bit BPE Innovation
-- Extended from standard subword units
-- Optimized for literary/shakespearean patterns
-- First implementation of 12-bit wide byte pairs
-
-### Pi-Randomized Sampling
-```javascript
-// Rhythmic diversity vs flat random sampling
-const sampledToken = predict(samplePiRhythm(140/π));
-```
-
-## 🎯 Semantic Preservation Through Tokenization
-
-The breakthrough mechanism: **BPE tokenization mappings serve as semantic anchors**
-
-### GPT ↔ Custom Token Translation:
-- **GPT Input**: `tokenizer.encode(text)` → GPT tokens
-- **Custom Output**: `gptToOwn[gptId]` → sequential custom token IDs
-- **Generation**: Predict sequential custom tokens → `ownVocab[customId]` → words
-
-### Continual Learning Bridge:
-```javascript
-// Load existing tokenization history
-const gptToOwn = load('./unified-aether-gpt-to-own.json');
-// Add new words preserving all historical mappings
-extendMappings(newWords, finalTokenCount); // = 895
-// Save evolved tokenization
-saveMappings('./unified-aether-gpt-to-own.json');
-```
-
-## 📊 Performance Characteristics
-
-**Training Times:**
-- Phase 1: ~5 minutes (1000 sentences)
-- Phase 2: ~2 minutes (Hangman word learning)
-- Phase 3: ~3 minutes (Token prediction training)
-
-**Memory Footprint:**
-- Models: ~50MB (transformer + decoded weights)
-- Embeddings: ~1MB (768×1300 float32)
-- Vocabulary: ~10KB (JSON mapping tables)
-
-## 🔬 Research Insights
-
-### Semantic Flow Validation
-- Phase 1 embeddings feed Phase 2 word learning
-- Phase 2 vocab preservation enables Phase 3 continuity
-- Tokenization boundaries maintain semantic coherence
-
-### Learning Dynamics
-- Hangman algorithm achieves 95%+ word learning accuracy
-- Pi-based sampling produces more "musical" outputs
-- BPE preservation enables vocabulary growth without forgetting
-
-### CPU Architecture Benefits
-- WASM deployment enables browser/web integration
-- No cloud dependency for local operation
-- Massively parallel backprop via custom kernels
-
-## 🎨 Sample Interaction
-
-```
-Æther is here. He only ever read 10 sonnets.
-Be kind.
-
-You: Tell me about beauty.
-
-Æther: largess golden might still when single own winters well
-being in gracious on is what in hap nor er consum ruinate frank
-by eating enjoys consum bud deface keep now keep flowers but nor
-destroys that time bosom within face mutual glutton each breed climbed
-fairest we livery pleasure remembered is single time used with all
-might deface despite despite from on cold hap shall deface weary from
-thereby thought might nor offend breed annoy what distillation pleasure sweet tyrants despite despite blood st being with deny in keep keep despite sweet in shame are youth legacy pleasure keep keep fuel single middle keep hours in st now nature single being consum keep time on reeleth mutual held being st breed leave so is never in nor stop
-
-You: You're quite poetic!
-
-Æther: sweet distillation destilleth sweet extremes bears regal blood
-mutual reeleth tastes spoiled st maintaind beauty o sweet fairy faerie
-source feeds summer transient exquisitely bred built faerie extremes
-bear heavy chains gallop sharper end quality faerie breeds preserves
-transient summer spoiled summer richer wilder bosom feeds wombe
-selfsame angel selfsame built breeds selfsame sharper livery built
-Extreme angel built fresh extremes made selfsame preserves spoil true
-gallop heavy weary spoil loves labourer lovelier trophy lovelier
-throne trophy spoil spoil spoil preserves heavier trophy built sharper
-spoils spoil sweet sweet spoil sweet spoil spoil sweet sweet spoil
-```
-
-## 🌟 Research Contributions
-
-1. **First 12-bit BPE implementation** for enhanced subword segmentation
-2. **Hangman learning algorithm** for rapid vocabulary acquisition
-3. **Semantic boundary preservation** through continual learning
-4. **Pi-based randomization** for improved output diversity
-5. **WASM CPU-only transformer** deployment
-
-## 📈 Future Directions
-
-- **Multi-modal semantic sources** beyond text
-- **Hierarchical hangman** for complex concept learning
-- **Embedded deployment** via WASM optimizations
-- **Collaborative learning** between multiple Æther instances
+## Notes, license, and contributions
+- Consider adding an explicit OSS license (MIT, Apache-2.0, etc.) if you want to clarify contribution and reuse terms.
+- If you'd like, I can also draft CONTRIBUTING guidelines or a small download helper script for fetching recommended Hugging Face artifacts.
 
 ---
-
-*"Built with 💝 for understanding the nature of learning itself"*"
--Viddy output
--Use for whatever you want it's free. 
-Provided with no licenses whatsoever. 
-Free as in "unhinged" ;) 
-But also free as in "I'm not allowed to profit off of it due to large AI company data restrictions on their end" 
